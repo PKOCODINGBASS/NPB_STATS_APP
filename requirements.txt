@@ -1,0 +1,6 @@
+streamlit==1.60.0
+pandas==3.0.5
+altair==6.2.2
+requests==2.32.3
+beautifulsoup4==4.12.3
+tzdata==2024.1
