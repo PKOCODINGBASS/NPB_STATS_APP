@@ -270,6 +270,90 @@ def charger_calendrier_mensuel(annee: int, mois: int) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False, ttl=1800)
+def charger_urls_anglais_mensuel(annee: int, mois: int) -> dict:
+    """
+    Construit, pour un mois donné, un dictionnaire {(date, code_home, code_away): url}
+    pointant vers la fiche de match EN ANGLAIS de npb.jp (section "/bis/eng/"), à
+    partir de la page "All Teams Calendar" anglaise :
+    https://npb.jp/bis/eng/{annee}/calendar/index_{mois}.html
+
+    Cette page anglaise est la source utilisée pour récupérer les noms de joueurs en
+    ROMAJI (alphabet latin) - la page japonaise (utilisée pour les runs/HR) n'affiche
+    les noms qu'en kanji/kana. Mars et avril partagent la même page côté anglais
+    ("index_04.html" couvre les deux mois), d'où le repli `mois_page`.
+    """
+    mois_page = 4 if mois == 3 else mois
+    url = f"https://npb.jp/bis/eng/{annee}/calendar/index_{mois_page:02d}.html"
+    resultat = {}
+    try:
+        soup = appeler_avec_retry(_get_soup, url)
+    except Exception:
+        return resultat
+
+    for cellule in soup.select('td.stschedule'):
+        lien_date = cellule.select_one('div.teschedate a[href]')
+        if lien_date is None:
+            continue
+        m_date = re.search(r'gm(\d{4})(\d{2})(\d{2})\.html', lien_date['href'])
+        if not m_date:
+            continue
+        date_str = f"{m_date.group(1)}-{m_date.group(2)}-{m_date.group(3)}"
+
+        for lien_match in cellule.select('div.stvsteam a[href]'):
+            texte = lien_match.get_text(strip=True)
+            m_equipes = re.match(r'^([A-Za-z]+)\s+(?:\d+|\*)\s*-\s*(?:\d+|\*)\s+([A-Za-z]+)$', texte)
+            if not m_equipes:
+                continue
+            code_home, code_away = m_equipes.group(1).lower(), m_equipes.group(2).lower()
+            href = lien_match['href']
+            url_match = "https://npb.jp" + href if href.startswith('/') else href
+            resultat[(date_str, code_home, code_away)] = url_match
+
+    return resultat
+
+
+@st.cache_data(show_spinner=False)
+def _get_noms_romaji_match(url_anglais: str, est_domicile: bool):
+    """
+    Récupère, sur la fiche de match ANGLAISE npb.jp correspondante, la liste ordonnée
+    des noms de famille des batteurs (en romaji) de l'équipe concernée, dans le MÊME
+    ordre d'apparition que sur la page japonaise (ordre de frappe officiel) - ce qui
+    permet, une fois les deux listes de même longueur, de faire correspondre chaque
+    joueur ligne par ligne entre les deux langues sans avoir besoin de "deviner" une
+    romanisation phonétique (peu fiable, en particulier pour les joueurs étrangers
+    dont le nom est écrit en katakana, ex: ダルベック -> Dalbec, imprévisible par
+    simple transcription phonétique).
+
+    Détail technique npb.jp (eng) : les 2 tableaux de frappeurs partagent la classe
+    CSS "gmtbltop" avec d'autres tableaux de mise en page (bannières d'équipe) ; on ne
+    garde donc que ceux contenant des cellules "gmbatter"/"gmnxtbatter". Le premier
+    tableau trouvé est celui de l'équipe à l'EXTÉRIEUR, le second celui à DOMICILE
+    (même convention que côté japonais).
+    """
+    if not url_anglais:
+        return []
+    try:
+        soup = appeler_avec_retry(_get_soup, url_anglais)
+    except Exception:
+        return []
+
+    tables_frappeurs = [
+        t for t in soup.select('table.gmtbltop')
+        if t.select_one('td.gmbatter, td.gmnxtbatter')
+    ]
+    if len(tables_frappeurs) < 2:
+        return []
+
+    table = tables_frappeurs[1] if est_domicile else tables_frappeurs[0]
+    noms = []
+    for td in table.select('td.gmbatter, td.gmnxtbatter'):
+        # Format de cellule : "Nom, POSTE" (ex: "Dalbec, 3B-1B") -> on ne garde que le nom
+        nom = td.get_text(strip=True).split(',')[0].strip()
+        noms.append(nom)
+    return noms
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
 def charger_donnees_equipe(annee: int = None, equipe_abbr: str = None) -> pd.DataFrame:
     """
     Charge les données de match TERMINÉS pour une équipe donnée, sur toute la saison,
@@ -341,6 +425,10 @@ def charger_donnees_equipe(annee: int = None, equipe_abbr: str = None) -> pd.Dat
                 "W/L": wl,
                 "box_url": g['box_url'],
                 "Est_Domicile": est_dom,
+                # Colonnes internes (non affichées) : nécessaires pour retrouver la
+                # fiche de match anglaise (noms de joueurs en romaji) plus tard.
+                "code_home": g['code_home'],
+                "code_away": g['code_away'],
             })
         df = pd.DataFrame(matchs).sort_values('Date').reset_index(drop=True)
         return df
@@ -350,7 +438,8 @@ def charger_donnees_equipe(annee: int = None, equipe_abbr: str = None) -> pd.Dat
 
 
 @st.cache_data(show_spinner=False)
-def get_stats_offensives_match(box_url: str, est_domicile: bool):
+def get_stats_offensives_match(box_url: str, est_domicile: bool, date_str: str = None,
+                                code_home: str = None, code_away: str = None):
     """
     Récupère, via le boxscore npb.jp d'un match (page japonaise détaillée, la seule à
     exposer les runs marqués par batteur), les runs ET les home runs marqués par
@@ -367,6 +456,18 @@ def get_stats_offensives_match(box_url: str, est_domicile: bool):
       "manche" affiche le résultat de l'action de jeu (ex: "右越本①" = home run par
       dessus le champ droit). On compte donc, pour chaque joueur, le nombre de cases
       de manche contenant le caractère "本" (本塁打 = home run).
+
+    --- Noms de joueurs en ROMAJI (alphabet latin) ---
+    La page japonaise ne donne les noms qu'en kanji/kana. Si `date_str`, `code_home`
+    et `code_away` sont fournis, cette fonction va chercher la fiche de match
+    ANGLAISE correspondante (`charger_urls_anglais_mensuel` + `_get_noms_romaji_match`)
+    et, si elle liste EXACTEMENT le même nombre de batteurs dans le même ordre (ce qui
+    est le cas en pratique : même ordre de passage au bâton des deux côtés), remplace
+    les noms japonais par leur équivalent romaji officiel ligne par ligne - PAS de
+    transcription phonétique automatique (peu fiable, notamment pour les joueurs
+    étrangers en katakana), mais bien le nom romanisé publié par npb.jp lui-même.
+    En cas d'échec (page indisponible, décompte différent), on retombe silencieusement
+    sur les noms japonais plutôt que de planter l'affichage.
     """
     if not box_url:
         return []
@@ -385,7 +486,7 @@ def get_stats_offensives_match(box_url: str, est_domicile: bool):
     if tbody is None:
         return []
 
-    stats_par_joueur = {}
+    lignes_ordonnees = []  # préserve l'ordre de frappe, nécessaire pour l'association avec les noms romaji
     for tr in tbody.find_all('tr', recursive=False):
         tds = tr.find_all('td', recursive=False)
         if len(tds) < 8:
@@ -407,11 +508,32 @@ def get_stats_offensives_match(box_url: str, est_domicile: bool):
         cellules_manches = tds[8:]
         hr = sum(1 for td in cellules_manches if '本' in td.get_text())
 
-        if runs > 0 or hr > 0:
-            if nom not in stats_par_joueur:
-                stats_par_joueur[nom] = {'runs': 0, 'hr': 0}
-            stats_par_joueur[nom]['runs'] += runs
-            stats_par_joueur[nom]['hr'] += hr
+        lignes_ordonnees.append({'name': nom, 'runs': runs, 'hr': hr})
+
+    # --- Substitution par les noms romaji officiels (si disponibles) ---
+    if date_str and code_home and code_away:
+        try:
+            mois = int(date_str.split('-')[1])
+            urls_anglais = charger_urls_anglais_mensuel(int(date_str.split('-')[0]), mois)
+            url_anglais = urls_anglais.get((date_str, code_home, code_away))
+            noms_romaji = _get_noms_romaji_match(url_anglais, est_domicile) if url_anglais else []
+            if noms_romaji and len(noms_romaji) == len(lignes_ordonnees):
+                for ligne, nom_romaji in zip(lignes_ordonnees, noms_romaji):
+                    ligne['name'] = nom_romaji
+        except Exception:
+            pass  # on garde les noms japonais en repli, jamais d'erreur bloquante ici
+
+    # Fusion des statistiques par nom final (romaji si dispo, japonais sinon), au cas
+    # où un même joueur apparaîtrait sur plusieurs lignes (remplacement puis retour, etc.)
+    stats_par_joueur = {}
+    for ligne in lignes_ordonnees:
+        if ligne['runs'] <= 0 and ligne['hr'] <= 0:
+            continue
+        cle = ligne['name']
+        if cle not in stats_par_joueur:
+            stats_par_joueur[cle] = {'runs': 0, 'hr': 0}
+        stats_par_joueur[cle]['runs'] += ligne['runs']
+        stats_par_joueur[cle]['hr'] += ligne['hr']
 
     return [{'name': nom, 'runs': s['runs'], 'hr': s['hr']} for nom, s in stats_par_joueur.items()]
 
@@ -436,7 +558,13 @@ def get_matchs_avec_scoreurs(annee: int, equipe_abbr: str):
     cumul_hr = {}
 
     for _, ligne in df.iterrows():
-        stats_batteurs = get_stats_offensives_match(ligne['box_url'], bool(ligne['Est_Domicile']))
+        stats_batteurs = get_stats_offensives_match(
+            ligne['box_url'],
+            bool(ligne['Est_Domicile']),
+            date_str=ligne.get('Date'),
+            code_home=ligne.get('code_home'),
+            code_away=ligne.get('code_away'),
+        )
 
         # On conserve les données BRUTES (liste de dicts {name, runs, hr}) dans une
         # colonne cachée, en plus de la version texte formatée pour l'affichage. Toute
