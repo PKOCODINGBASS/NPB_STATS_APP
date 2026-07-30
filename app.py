@@ -127,6 +127,48 @@ NOM_COURT_TO_CODE = {
     "ソフトバンク": "h", "日本ハム": "f", "オリックス": "b", "楽天": "e", "西武": "l", "ロッテ": "m",
 }
 
+# Traduction des noms de stades (affichés en japonais sur les pages de calendrier
+# utilisées) vers leur nom anglais usuel. Couvre les 12 stades "domicile" des
+# équipes NPB, utilisés l'immense majorité du temps ; les stades régionaux plus
+# rares (matchs "hors les murs" organisés quelques fois par saison) ne sont pas
+# tous listés - dans ce cas, le nom japonais d'origine est affiché en repli.
+STADES_NPB = {
+    "東京ドーム": "Tokyo Dome",
+    "甲子園": "Koshien Stadium",
+    "横浜スタジアム": "Yokohama Stadium",
+    "バンテリンドーム": "Vantelin Dome Nagoya",
+    "バンテリンドームナゴヤ": "Vantelin Dome Nagoya",
+    "ナゴヤドーム": "Vantelin Dome Nagoya",
+    "マツダスタジアム": "Mazda Stadium",
+    "神　宮": "Meiji Jingu Stadium",
+    "神宮": "Meiji Jingu Stadium",
+    "明治神宮野球場": "Meiji Jingu Stadium",
+    "楽天モバイル": "Rakuten Mobile Park Miyagi",
+    "楽天モバイルパーク宮城": "Rakuten Mobile Park Miyagi",
+    "エスコンＦ": "Es Con Field Hokkaido",
+    "エスコンフィールド北海道": "Es Con Field Hokkaido",
+    "ベルーナドーム": "Belluna Dome",
+    "京セラＤ大阪": "Kyocera Dome Osaka",
+    "京セラドーム大阪": "Kyocera Dome Osaka",
+    "ＺＯＺＯマリン": "ZOZO Marine Stadium",
+    "ゾゾマリン": "ZOZO Marine Stadium",
+    "福岡ＰａｙＰａｙドーム": "Fukuoka PayPay Dome",
+    "みずほＰａｙＰａｙドーム福岡": "Fukuoka PayPay Dome",
+    # Quelques stades régionaux fréquemment utilisés pour des matchs "hors les murs"
+    "盛　岡": "Morioka",
+    "郡　山": "Koriyama",
+    "沖縄セルラースタジアム那覇": "Okinawa Cellular Stadium Naha",
+    "静　岡": "Shizuoka",
+    "富　山": "Toyama",
+}
+
+
+def traduire_stade(nom_stade: str) -> str:
+    """Traduit un nom de stade japonais vers l'anglais si connu, sinon le retourne tel quel."""
+    if not nom_stade:
+        return nom_stade
+    return STADES_NPB.get(nom_stade, nom_stade)
+
 # ============================================================
 # 4. FONCTIONS DE CHARGEMENT DES DONNÉES (avec mise en cache)
 # ============================================================
@@ -724,7 +766,7 @@ def obtenir_calendrier_du_jour_jst():
 
 
 @st.cache_data(show_spinner=False, ttl=1800)
-def _charger_lanceurs_annonces():
+def _charger_ids_lanceurs_annonces():
     """
     Scrape la page officielle des lanceurs partants annoncés ("予告先発投手") :
     https://npb.jp/announcement/starter/
@@ -733,7 +775,11 @@ def _charger_lanceurs_annonces():
     page contient donc, en pratique, les partants du prochain jour de matchs - ce qui
     correspond exactement au "match du jour" (JST) recherché par cette application.
 
-    Retourne un dict {code_equipe_minuscule: (nom_lanceur, id_lanceur_npb)}.
+    On ne récupère ICI que l'identifiant npb.jp du joueur (le nom, lui, est ensuite
+    récupéré en anglais/romaji via `obtenir_infos_lanceur`, qui utilise la fiche
+    joueur anglaise plutôt que le nom japonais affiché sur cette page).
+
+    Retourne un dict {code_equipe_minuscule: id_lanceur_npb}.
     """
     url = "https://npb.jp/announcement/starter/"
     resultat = {}
@@ -759,21 +805,17 @@ def _charger_lanceurs_annonces():
             if lien_joueur is None:
                 continue
             m_id = re.search(r'/bis/players/(\d+)\.html', lien_joueur['href'])
-            if not m_id:
-                continue
-
-            nom = lien_joueur.get_text(strip=True)
-            if nom:
-                resultat[code] = (nom, m_id.group(1))
+            if m_id:
+                resultat[code] = m_id.group(1)
 
     return resultat
 
 
-def obtenir_lanceur_annonce(code_equipe: str):
-    """Retourne (nom_lanceur, id_lanceur_npb) pour le code équipe donné, ou (None, None)."""
+def obtenir_id_lanceur_annonce(code_equipe: str):
+    """Retourne l'identifiant npb.jp du lanceur annoncé pour le code équipe donné, ou None."""
     if not code_equipe:
-        return None, None
-    return _charger_lanceurs_annonces().get(code_equipe.lower(), (None, None))
+        return None
+    return _charger_ids_lanceurs_annonces().get(code_equipe.lower())
 
 
 @st.cache_data(show_spinner=False, ttl=300)
@@ -828,24 +870,20 @@ def obtenir_match_du_jour(code_equipe: str):
         except Exception:
             heure_paris_str = None
 
-    # Le lanceur annoncé est cherché en priorité sur la page dédiée
-    # "/announcement/starter/" (elle seule fournit l'identifiant npb.jp du joueur,
-    # nécessaire pour aller chercher ses statistiques ensuite). Si cette page ne le
-    # liste pas encore (ex: décalage de publication) mais que la page de calendrier
-    # du jour l'a déjà (colonne "先発" - starter annoncé), on utilise ce nom en
-    # repli pour l'affichage (sans stats détaillées, faute d'identifiant joueur).
-    lanceur_notre_equipe, _ = obtenir_lanceur_annonce(code_equipe)
-    lanceur_adverse, id_lanceur_adverse = obtenir_lanceur_annonce(code_adverse)
+    # Le lanceur annoncé est cherché sur la page dédiée "/announcement/starter/", qui
+    # fournit l'identifiant npb.jp du joueur. Le NOM (en anglais/romaji) et les
+    # statistiques du lanceur adverse sont ensuite récupérés EN UNE SEULE FOIS via
+    # `obtenir_infos_lanceur` (fiche joueur anglaise), pour les deux équipes - ce qui
+    # évite un second appel réseau séparé côté interface pour les stats du lanceur
+    # adverse, et garantit que le nom affiché n'est jamais en kanji/kana.
+    id_lanceur_notre_equipe = obtenir_id_lanceur_annonce(code_equipe)
+    id_lanceur_adverse = obtenir_id_lanceur_annonce(code_adverse)
 
-    lanceur_annonce_home = (ligne.get('lanceur_annonce_home') or "").strip()
-    lanceur_annonce_away = (ligne.get('lanceur_annonce_away') or "").strip()
-    lanceur_annonce_notre_equipe = lanceur_annonce_home if est_domicile else lanceur_annonce_away
-    lanceur_annonce_adverse = lanceur_annonce_away if est_domicile else lanceur_annonce_home
+    infos_notre_lanceur = obtenir_infos_lanceur(id_lanceur_notre_equipe, ANNEE_COURANTE)
+    infos_lanceur_adverse = obtenir_infos_lanceur(id_lanceur_adverse, ANNEE_COURANTE)
 
-    if not lanceur_notre_equipe and lanceur_annonce_notre_equipe:
-        lanceur_notre_equipe = lanceur_annonce_notre_equipe
-    if not lanceur_adverse and lanceur_annonce_adverse:
-        lanceur_adverse = lanceur_annonce_adverse
+    lanceur_notre_equipe = infos_notre_lanceur['nom'] if infos_notre_lanceur else None
+    lanceur_adverse = infos_lanceur_adverse['nom'] if infos_lanceur_adverse else None
 
     score_home, score_away = ligne.get('score_home'), ligne.get('score_away')
     if pd.notna(score_home) and pd.notna(score_away):
@@ -858,43 +896,64 @@ def obtenir_match_du_jour(code_equipe: str):
         'est_domicile': est_domicile,
         'lanceur_notre_equipe': lanceur_notre_equipe,
         'lanceur_adverse': lanceur_adverse,
-        'id_lanceur_adverse': id_lanceur_adverse,
+        'stats_lanceur_adverse': infos_lanceur_adverse,
         'heure_jst': heure_jst_str or "—",
         'heure_paris': heure_paris_str or "—",
         'statut': statut,
-        'venue': ligne.get('lieu') or "—",
+        'venue': traduire_stade(ligne.get('lieu')) or "—",
     }
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def obtenir_stats_lanceur(nom_lanceur: str, id_lanceur: str, annee: int):
+def obtenir_infos_lanceur(id_lanceur: str, annee: int):
     """
-    Récupère, via la fiche joueur officielle npb.jp (https://npb.jp/bis/players/{id}.html),
-    les statistiques de la saison en cours du lanceur (ERA, WHIP calculé, runs alloués,
-    HR alloués, HR/9, nombre d'apparitions comme approximation du nombre de départs).
+    Récupère, via la fiche joueur ANGLAISE officielle npb.jp
+    (https://npb.jp/bis/eng/players/{id}.html), le nom romanisé du lanceur ET ses
+    statistiques de la saison en cours (ERA, WHIP calculé, runs/HR alloués, HR/9,
+    apparitions). Utiliser la page anglaise (plutôt que la page japonaise utilisée
+    dans une version précédente) donne directement le nom en alphabet latin, sans
+    avoir besoin d'une étape de traduction séparée.
 
     NPB.jp n'affiche pas de WHIP ni de HR/9 tout faits sur cette page (contrairement à
     MLB StatsAPI) : ils sont donc calculés ici à partir des statistiques brutes
-    publiées (安打=hits alloués, 四球=BB alloués, 投球回=manches lancées, 本塁打=HR alloués).
+    publiées (H=hits alloués, BB=buts-sur-balles alloués, IP=manches lancées,
+    HR=home runs alloués).
 
-    Retourne None si l'id est vide, si le lanceur n'a pas de ligne de stats pour
-    `annee`, ou si les données sont insuffisantes (ex: lanceur de relève sans
-    historique exploitable).
+    Retourne un dict {'nom', 'era', 'whip', 'runs_alloues', 'hr_alloues', 'hr_par_9',
+    'matchs_titulaire'} dès que la fiche joueur existe (le nom est alors toujours
+    renseigné), avec les champs statistiques à None si aucune ligne de stats n'existe
+    pour `annee` (ex: lanceur tout juste appelé, sans historique exploitable).
+    Retourne None si l'id est vide ou si la fiche joueur est introuvable.
     """
     if not id_lanceur:
         return None
-    url = f"https://npb.jp/bis/players/{id_lanceur}.html"
+    url = f"https://npb.jp/bis/eng/players/{id_lanceur}.html"
     try:
         soup = appeler_avec_retry(_get_soup, url)
     except Exception:
         return None
 
+    li_nom = soup.find('li', id='pc_v_name')
+    nom = li_nom.get_text(strip=True) if li_nom else None
+    if not nom:
+        return None
+
+    resultat = {
+        'nom': nom,
+        'era': None,
+        'whip': None,
+        'runs_alloues': None,
+        'hr_alloues': None,
+        'hr_par_9': None,
+        'matchs_titulaire': None,
+    }
+
     table = soup.find('table', id='tablefix_p')
     if table is None:
-        return None
+        return resultat
     tbody = table.find('tbody')
     if tbody is None:
-        return None
+        return resultat
 
     ligne_annee = None
     for tr in tbody.find_all('tr'):
@@ -902,36 +961,36 @@ def obtenir_stats_lanceur(nom_lanceur: str, id_lanceur: str, annee: int):
         if td_annee and td_annee.get_text(strip=True) == str(annee):
             ligne_annee = tr
     if ligne_annee is None:
-        return None
+        return resultat
 
     tds = ligne_annee.find_all('td', recursive=False)
-    # Colonnes (ordre fixe affiché par npb.jp) :
-    # 0:année 1:équipe 2:apparitions 3:V 4:D 5:Sv 6:Hold 7:HoldPt 8:CG 9:ShO
-    # 10:sansBB 11:%V 12:BF 13:IP(tableau imbriqué) 14:H 15:HR 16:BB 17:HBP
-    # 18:SO 19:WP 20:Balk 21:R 22:ER 23:ERA
-    if len(tds) < 24:
-        return None
+    # Colonnes (page ANGLAISE - son ordre diffère légèrement de la page japonaise, qui
+    # a une colonne supplémentaire "無四球"/matchs sans BB entre CG/SHO et PCT) :
+    # 0:Year 1:Team 2:G(apparitions) 3:W 4:L 5:SV 6:HLD 7:HP 8:CG 9:SHO 10:PCT 11:BF
+    # 12:IP(tableau imbriqué) 13:H 14:HR 15:BB 16:HB 17:SO 18:WP 19:BK 20:R 21:ER 22:ERA
+    if len(tds) < 23:
+        return resultat
 
     def _txt(i):
         return tds[i].get_text(strip=True)
 
     try:
         apparitions = int(_txt(2) or 0)
-        hits_alloues = int(_txt(14) or 0)
-        hr_alloues = int(_txt(15) or 0)
-        bb_alloues = int(_txt(16) or 0)
-        runs_alloues = int(_txt(21) or 0)
-        era = float(_txt(23) or 0)
+        hits_alloues = int(_txt(13) or 0)
+        hr_alloues = int(_txt(14) or 0)
+        bb_alloues = int(_txt(15) or 0)
+        runs_alloues = int(_txt(20) or 0)
+        era = float(_txt(22) or 0)
     except ValueError:
-        return None
+        return resultat
 
     if not era:
-        return None
+        return resultat
 
     # Manches lancées : encodées dans un mini-tableau imbriqué à l'intérieur de la
-    # cellule "投球回" (entier de manches en <th>, fraction de manche ".1"/".2" en <td>).
+    # cellule "IP" (entier de manches en <th>, fraction de manche ".1"/".2" en <td>).
     manches_entieres, tiers = 0, 0
-    cellule_ip = tds[13]
+    cellule_ip = tds[12]
     th_manches = cellule_ip.find('th')
     td_fraction = cellule_ip.find('td')
     if th_manches and th_manches.get_text(strip=True).isdigit():
@@ -944,20 +1003,17 @@ def obtenir_stats_lanceur(nom_lanceur: str, id_lanceur: str, annee: int):
             tiers = 2
     innings_lancees = manches_entieres + tiers / 3.0
     if innings_lancees <= 0:
-        return None
+        return resultat
 
-    whip = (hits_alloues + bb_alloues) / innings_lancees
-    hr_par_9 = (hr_alloues / innings_lancees) * 9
-
-    return {
-        'nom': nom_lanceur or "Lanceur adverse",
+    resultat.update({
         'era': era,
-        'whip': whip,
+        'whip': (hits_alloues + bb_alloues) / innings_lancees,
         'runs_alloues': runs_alloues,
         'hr_alloues': hr_alloues,
-        'hr_par_9': hr_par_9,
+        'hr_par_9': (hr_alloues / innings_lancees) * 9,
         'matchs_titulaire': apparitions,
-    }
+    })
+    return resultat
 
 
 def predire_runs_match(moyenne_runs_equipe, moyenne_ra_equipe, stats_lanceur_adverse):
@@ -977,7 +1033,7 @@ def predire_runs_match(moyenne_runs_equipe, moyenne_ra_equipe, stats_lanceur_adv
     if moyenne_runs_equipe is None:
         return None
 
-    if stats_lanceur_adverse is not None and stats_lanceur_adverse.get('era', 0) > 0:
+    if stats_lanceur_adverse is not None and (stats_lanceur_adverse.get('era') or 0) > 0:
         era = stats_lanceur_adverse['era']
         whip = stats_lanceur_adverse['whip']
         # Moyenne pondérée entre la forme offensive de l'équipe et la vulnérabilité du lanceur adverse
@@ -1044,7 +1100,7 @@ def predire_joueurs_du_jour(cumul_runs_10, cumul_hr_10, stats_lanceur_adverse, t
     # élevés, plus il est jugé "battable" (facteur > 1) ; un lanceur dominant réduit
     # le facteur (< 1). Le facteur est borné pour rester réaliste (pas d'emballement).
     facteur_adverse = 1.0
-    if stats_lanceur_adverse is not None and stats_lanceur_adverse.get('era', 0) > 0:
+    if stats_lanceur_adverse is not None and (stats_lanceur_adverse.get('era') or 0) > 0:
         era = stats_lanceur_adverse['era']
         whip = stats_lanceur_adverse['whip']
         hr9 = stats_lanceur_adverse['hr_par_9']
@@ -1402,14 +1458,12 @@ with onglets[1]:
                 st.markdown(f"**{match_du_jour['adversaire']}**")
                 st.markdown(f"### {match_du_jour['lanceur_adverse'] or 'Non annoncé'}")
 
-            with st.spinner("Analyse des statistiques du lanceur adverse..."):
-                stats_lanceur_adverse = obtenir_stats_lanceur(
-                    match_du_jour['lanceur_adverse'],
-                    match_du_jour['id_lanceur_adverse'],
-                    annee,
-                )
+            # Les stats du lanceur adverse (saison en cours) ont déjà été récupérées par
+            # `obtenir_match_du_jour` (en même temps que son nom romaji), il n'y a donc
+            # plus besoin d'un second appel réseau séparé ici.
+            stats_lanceur_adverse = match_du_jour['stats_lanceur_adverse']
 
-            if stats_lanceur_adverse:
+            if stats_lanceur_adverse and stats_lanceur_adverse.get('era'):
                 st.caption(
                     f"Stats saison {annee} de {stats_lanceur_adverse['nom']} : "
                     f"ERA {stats_lanceur_adverse['era']:.2f} · WHIP {stats_lanceur_adverse['whip']:.2f} · "
@@ -1446,7 +1500,7 @@ with onglets[1]:
                     f"{moyenne_ra_10:.2f} runs concédés/match sur les 10 derniers matchs, "
                     + (
                         f"croisée avec les stats du lanceur adverse ({stats_lanceur_adverse['nom']})."
-                        if stats_lanceur_adverse
+                        if stats_lanceur_adverse and stats_lanceur_adverse.get('era')
                         else "en l'absence de stats fiables sur le lanceur adverse."
                     )
                 )
