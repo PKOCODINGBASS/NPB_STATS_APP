@@ -1248,6 +1248,275 @@ def predire_joueurs_du_jour(cumul_runs_10, cumul_hr_10, stats_lanceur_adverse, t
     return resultats[:top_n]
 
 
+def _normaliser_colonne(serie: pd.Series) -> pd.Series:
+    """
+    Normalisation min-max dans [0, 1] d'une colonne de statistiques, pour pouvoir
+    combiner des métriques d'échelles très différentes (ex: HR 0-6, ERA 2-6) dans un
+    même indice pondéré. Renvoie une série neutre à 0.5 si la colonne est constante
+    (évite une division par zéro sans fausser le classement).
+    """
+    minimum, maximum = serie.min(), serie.max()
+    if pd.isna(minimum) or pd.isna(maximum) or maximum == minimum:
+        return pd.Series([0.5] * len(serie), index=serie.index)
+    return (serie - minimum) / (maximum - minimum)
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def obtenir_resume_10_derniers_matchs_equipe(annee: int, code_equipe: str):
+    """
+    Version "légère" de `get_matchs_avec_scoreurs`, dédiée à l'onglet Hot Pronostics :
+    ne scrape les boxscores QUE des 10 DERNIERS matchs terminés de l'équipe (au lieu de
+    toute la saison). L'onglet Hot Pronostics a besoin de ce résumé pour TOUTES les
+    équipes qui jouent aujourd'hui (jusqu'à 12) : rescraper la saison complète de
+    chacune (comme le fait l'onglet "Analyse par Équipe" pour l'équipe sélectionnée)
+    multiplierait le nombre de requêtes envoyées à npb.jp par (matchs de la saison) x
+    (équipes du jour), un coût vite prohibitif en pleine saison régulière. Chaque
+    boxscore individuel reste mis en cache par `get_stats_offensives_match`, donc
+    consulter ensuite l'onglet "Analyse par Équipe" pour une de ces équipes réutilise
+    directement les 10 boxscores déjà récupérés ici.
+
+    Retourne un dict {'moyenne_runs', 'moyenne_ra', 'cumul_runs', 'cumul_hr'} (mêmes
+    clés que celles produites par `calculer_resume_10_derniers_matchs`), ou None si
+    aucune donnée n'est disponible pour cette équipe/saison.
+    """
+    df_equipe = charger_donnees_equipe(annee, code_equipe)
+    if df_equipe.empty:
+        return None
+
+    df_10 = df_equipe.tail(10).copy()
+    df_10['_offensive_stats'] = [
+        get_stats_offensives_match(
+            ligne['box_url'],
+            bool(ligne['Est_Domicile']),
+            date_str=ligne.get('Date'),
+            code_home=ligne.get('code_home'),
+            code_away=ligne.get('code_away'),
+        )
+        for _, ligne in df_10.iterrows()
+    ]
+
+    moyenne_runs, _, _, _, cumul_runs, cumul_hr = calculer_resume_10_derniers_matchs(df_10)
+    moyenne_ra = pd.to_numeric(df_10['RA'], errors='coerce').mean() if 'RA' in df_10.columns else None
+
+    return {
+        'moyenne_runs': moyenne_runs,
+        'moyenne_ra': moyenne_ra,
+        'cumul_runs': cumul_runs,
+        'cumul_hr': cumul_hr,
+    }
+
+
+def _calculer_top5_home_runs_npb(candidats: list) -> pd.DataFrame:
+    """
+    Construit le classement "Top 5 Home Runs probables" à partir de la liste de
+    candidats (un par joueur ayant marqué au moins 1 HR sur les 10 derniers matchs de
+    son équipe, pour chaque équipe jouant aujourd'hui). Indice pondéré : HR sur les 10
+    derniers matchs (60%) + HR/9 du lanceur partant adverse ANNONCÉ (40%).
+
+    npb.jp ne fournissant pas de SLG par joueur (contrairement à MLB StatsAPI, qui
+    l'expose via un endpoint groupé), ce 3e facteur utilisé côté MLB est absent ici
+    (voir docstring de `construire_donnees_hot_pronostics` pour le détail des
+    différences par rapport à la version MLB).
+    """
+    if not candidats:
+        return pd.DataFrame()
+    df = pd.DataFrame(candidats)
+    indice = (
+        _normaliser_colonne(df['HR (10 derniers matchs)']) * 0.60
+        + _normaliser_colonne(df['HR/9 lanceur adverse']) * 0.40
+    ) * 100
+    df['Indice HR (/100)'] = indice.round(1)
+    df = df.sort_values('Indice HR (/100)', ascending=False).head(5).reset_index(drop=True)
+    return df[[
+        'Joueur', 'Équipe', 'Adversaire', 'Lanceur adverse',
+        'HR (10 derniers matchs)', 'HR/9 lanceur adverse', 'Indice HR (/100)'
+    ]]
+
+
+def _calculer_top5_runs_npb(candidats: list) -> pd.DataFrame:
+    """
+    Construit le classement "Top 5 joueurs pour marquer un run" à partir de la liste de
+    candidats (un par joueur ayant marqué au moins 1 run sur les 10 derniers matchs de
+    son équipe, pour chaque équipe jouant aujourd'hui). Indice pondéré : runs sur les
+    10 derniers matchs (60%) + ERA du lanceur partant adverse ANNONCÉ (40%, un ERA
+    élevé indique un lanceur plus "battable").
+
+    npb.jp ne fournissant ni l'OBP par joueur ni la position dans le lineup (les
+    lineups ne sont, contrairement à MLB, pas publiées à l'avance), ces deux facteurs
+    utilisés côté MLB sont absents ici (voir docstring de
+    `construire_donnees_hot_pronostics`).
+    """
+    if not candidats:
+        return pd.DataFrame()
+    df = pd.DataFrame(candidats)
+    indice = (
+        _normaliser_colonne(df['Runs (10 derniers matchs)']) * 0.60
+        + _normaliser_colonne(df['ERA lanceur adverse']) * 0.40
+    ) * 100
+    df['Indice Run (/100)'] = indice.round(1)
+    df = df.sort_values('Indice Run (/100)', ascending=False).head(5).reset_index(drop=True)
+    return df[[
+        'Joueur', 'Équipe', 'Adversaire', 'Lanceur adverse',
+        'Runs (10 derniers matchs)', 'ERA lanceur adverse', 'Indice Run (/100)'
+    ]]
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def construire_donnees_hot_pronostics(annee: int):
+    """
+    Calcul GLOBAL et coûteux (mis en cache via @st.cache_data, ttl=30min) qui scanne
+    TOUS les matchs du jour (heure du Japon, JST) et construit les 3 tableaux de
+    l'onglet "Hot Pronostics" : Top 5 Home Runs, Top 5 joueurs pour marquer un run, et
+    le récapitulatif Win/Lose de chaque confrontation. Ce calcul est indépendant de
+    l'équipe sélectionnée dans la sidebar, donc mis en cache séparément (clé = `annee`
+    uniquement) pour ne jamais être relancé inutilement quand l'utilisateur change
+    d'équipe.
+
+    --- Différences par rapport à la version MLB (StatsAPI) ---
+    Cet onglet est un portage adapté de l'onglet équivalent de MLB_Stats_App, qui
+    s'appuie sur des capacités propres à MLB StatsAPI absentes côté npb.jp (scraping) :
+    - Pas de lineups officielles (ordre de frappe) publiées à l'avance : les candidats
+      HR/Runs ne sont donc pas les titulaires confirmés du jour (inconnus à l'avance
+      en NPB), mais les joueurs de chaque équipe qui jouent aujourd'hui ayant marqué
+      des runs/HR sur leurs 10 DERNIERS matchs (même source de vérité que le résumé
+      "10 derniers matchs" de l'onglet Analyse par Équipe) - une bonne mesure de forme
+      récente, déjà utilisée et validée ailleurs dans l'application.
+    - Pas d'endpoint groupé de stats saison par joueur (SLG/OBP) : les indices HR/Runs
+      n'utilisent donc que 2 facteurs chacun (voir `_calculer_top5_home_runs_npb` /
+      `_calculer_top5_runs_npb`) au lieu de 3 côté MLB.
+    - Les lanceurs partants ANNONCÉS (une seule page pour tous les matchs du jour, cf.
+      `_charger_ids_lanceurs_annonces`) et le modèle `predire_probabilite_victoire`
+      (déjà utilisé par l'onglet "Prédictions du jour") sont en revanche réutilisés
+      TELS QUELS, exactement comme côté MLB.
+
+    Retourne (matchs_du_jour, df_top5_hr, df_top5_runs, df_victoires).
+    """
+    df_jour, maintenant_jst = obtenir_calendrier_du_jour_jst()
+    if df_jour.empty:
+        return [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    ids_lanceurs_annonces = _charger_ids_lanceurs_annonces()
+
+    matchs_du_jour = []
+    for _, g in df_jour.iterrows():
+        code_home = (g.get('code_home') or '').lower()
+        code_away = (g.get('code_away') or '').lower()
+        if not code_home or not code_away:
+            continue
+        nom_home = TEAMS_NPB.get(code_home.upper(), g.get('nom_home'))
+        nom_away = TEAMS_NPB.get(code_away.upper(), g.get('nom_away'))
+
+        infos_p_home = obtenir_infos_lanceur(ids_lanceurs_annonces.get(code_home), annee)
+        infos_p_away = obtenir_infos_lanceur(ids_lanceurs_annonces.get(code_away), annee)
+
+        # Double fuseau horaire (même logique que `obtenir_match_du_jour`)
+        heure_jst_str = (g.get('heure_jst') or '').strip()
+        heure_paris_str = None
+        if re.match(r'^\d{1,2}:\d{2}$', heure_jst_str):
+            try:
+                h, m = map(int, heure_jst_str.split(':'))
+                dt_jst = datetime(maintenant_jst.year, maintenant_jst.month, maintenant_jst.day, h, m, tzinfo=TZ_JST)
+                heure_paris_str = dt_jst.astimezone(TZ_PARIS).strftime('%d/%m à %H:%M')
+            except Exception:
+                heure_paris_str = None
+
+        matchs_du_jour.append({
+            'code_home': code_home,
+            'code_away': code_away,
+            'home_name': nom_home,
+            'away_name': nom_away,
+            'home_pitcher': infos_p_home,
+            'away_pitcher': infos_p_away,
+            'heure_jst': heure_jst_str or "—",
+            'heure_paris': heure_paris_str or "—",
+        })
+
+    if not matchs_du_jour:
+        return [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    # Résumé "10 derniers matchs" calculé UNE SEULE FOIS par équipe jouant aujourd'hui
+    # (une équipe NPB ne joue qu'un seul match par jour, donc pas de risque de calcul
+    # en double ici).
+    codes_equipes_jour = sorted({m['code_home'] for m in matchs_du_jour} | {m['code_away'] for m in matchs_du_jour})
+    resumes_equipe = {
+        code: obtenir_resume_10_derniers_matchs_equipe(annee, code.upper())
+        for code in codes_equipes_jour
+    }
+
+    candidats_hr = []
+    candidats_runs = []
+    lignes_victoire = []
+
+    for m in matchs_du_jour:
+        resume_home = resumes_equipe.get(m['code_home'])
+        resume_away = resumes_equipe.get(m['code_away'])
+
+        # --- Tableau Win/Lose : on réutilise TEL QUEL le modèle heuristique déjà
+        # validé dans l'onglet "Prédictions du jour" (`predire_probabilite_victoire`),
+        # avec les moyennes de runs RÉELLES des deux équipes (au lieu du proxy "runs
+        # concédés par notre équipe" utilisé dans l'onglet mono-équipe, où l'attaque
+        # adverse n'est pas directement disponible sans ce résumé multi-équipes).
+        pct_home, pct_away = predire_probabilite_victoire(
+            resume_home['moyenne_runs'] if resume_home else None,
+            resume_away['moyenne_runs'] if resume_away else None,
+            m['home_pitcher'],
+            m['away_pitcher'],
+            est_domicile=True,
+        )
+        lignes_victoire.append({
+            'Heure (France)': m['heure_paris'],
+            'Équipe Domicile': m['home_name'],
+            'Lanceur Domicile': (m['home_pitcher']['nom'] if m['home_pitcher'] else None) or 'Non annoncé',
+            'Équipe Extérieur': m['away_name'],
+            'Lanceur Extérieur': (m['away_pitcher']['nom'] if m['away_pitcher'] else None) or 'Non annoncé',
+            'Proba Domicile (%)': pct_home,
+            'Proba Extérieur (%)': pct_away,
+        })
+
+        # --- Candidats HR / Runs : chaque équipe est croisée avec le lanceur partant
+        # ADVERSE annoncé (celui qu'elle affrontera aujourd'hui).
+        for resume_camp, lanceur_adverse, equipe_nom, adversaire_nom in (
+            (resume_home, m['away_pitcher'], m['home_name'], m['away_name']),
+            (resume_away, m['home_pitcher'], m['away_name'], m['home_name']),
+        ):
+            if not resume_camp:
+                continue
+            nom_lanceur_adverse = lanceur_adverse['nom'] if lanceur_adverse else 'Non annoncé'
+            hr9_adverse = (
+                lanceur_adverse['hr_par_9']
+                if lanceur_adverse and lanceur_adverse.get('hr_par_9') else 1.0
+            )
+            era_adverse = (
+                lanceur_adverse['era']
+                if lanceur_adverse and lanceur_adverse.get('era') else 4.5
+            )
+
+            for nom_joueur, total_hr in resume_camp['cumul_hr'].items():
+                candidats_hr.append({
+                    'Joueur': nom_joueur,
+                    'Équipe': equipe_nom,
+                    'Adversaire': adversaire_nom,
+                    'Lanceur adverse': nom_lanceur_adverse,
+                    'HR (10 derniers matchs)': total_hr,
+                    'HR/9 lanceur adverse': hr9_adverse,
+                })
+            for nom_joueur, total_runs in resume_camp['cumul_runs'].items():
+                candidats_runs.append({
+                    'Joueur': nom_joueur,
+                    'Équipe': equipe_nom,
+                    'Adversaire': adversaire_nom,
+                    'Lanceur adverse': nom_lanceur_adverse,
+                    'Runs (10 derniers matchs)': total_runs,
+                    'ERA lanceur adverse': era_adverse,
+                })
+
+    df_top5_hr = _calculer_top5_home_runs_npb(candidats_hr)
+    df_top5_runs = _calculer_top5_runs_npb(candidats_runs)
+    df_victoires = pd.DataFrame(lignes_victoire)
+
+    return matchs_du_jour, df_top5_hr, df_top5_runs, df_victoires
+
+
 # ============================================================
 # 5. INTERFACE PRINCIPALE
 # ============================================================
@@ -1288,14 +1557,123 @@ EQUIPES_NPB = get_teams_npb(annee)
 # 6. ONGLETS PRINCIPAUX
 # ============================================================
 onglets = st.tabs([
+    "🔥 Hot Pronostics",
     "📊 Analyse par Équipe",
     "🔮 Prédictions du jour"
-])
+], on_change="rerun")
 
 # --------------------------------------------------------------
-# ONGLET 1: ANALYSE PAR ÉQUIPE
+# ONGLET 1: HOT PRONOSTICS (scan global de tous les matchs du jour, heure du Japon)
 # --------------------------------------------------------------
 with onglets[0]:
+    if onglets[0].open:
+        st.header("🔥 Hot Pronostics du jour")
+        st.markdown("### Les meilleurs pronostics du jour, tous matchs confondus (heure du Japon)")
+        st.caption(
+            "⚠️ Estimations statistiques automatiques calculées à partir des lanceurs partants "
+            "annoncés (annoncés la veille au Japon) et de la forme récente des joueurs (10 "
+            "derniers matchs). Ce ne sont pas des garanties de résultat : simples heuristiques, "
+            "à utiliser uniquement à titre informatif, avec discernement si vous vous en servez "
+            "pour parier."
+        )
+
+        if annee != ANNEE_COURANTE:
+            st.info(
+                f"Les Hot Pronostics ne sont disponibles que pour la saison en cours "
+                f"({ANNEE_COURANTE}). Sélectionnez {ANNEE_COURANTE} dans le menu de gauche."
+            )
+        else:
+            with st.spinner("Analyse de tous les matchs du jour (lanceurs annoncés, forme récente des 10 derniers matchs)..."):
+                matchs_jour, df_top5_hr, df_top5_runs, df_victoires = construire_donnees_hot_pronostics(annee)
+
+            if not matchs_jour:
+                st.info("Aucun match n'est prévu aujourd'hui (heure du Japon).")
+            else:
+                nb_lanceurs_annonces = sum(
+                    1 for m in matchs_jour if m['home_pitcher'] or m['away_pitcher']
+                )
+                st.caption(
+                    f"📅 {len(matchs_jour)} match(s) au programme aujourd'hui (heure du Japon) · "
+                    f"lanceur(s) partant(s) annoncé(s) pour {nb_lanceurs_annonces} match(s) sur "
+                    f"{len(matchs_jour)} (au Japon, les partants sont annoncés la veille du match - "
+                    "revenez plus tard pour voir apparaître les matchs restants)."
+                )
+
+                st.markdown("---")
+                st.subheader("💣 Top 5 Home Runs probables")
+                if df_top5_hr.empty:
+                    st.info(
+                        "Pas assez de données récentes (HR sur les 10 derniers matchs) pour établir "
+                        "un classement pour le moment."
+                    )
+                else:
+                    st.dataframe(
+                        df_top5_hr,
+                        column_config={
+                            "HR (10 derniers matchs)": st.column_config.NumberColumn("HR (10 derniers matchs)", format="%d"),
+                            "HR/9 lanceur adverse": st.column_config.NumberColumn("HR/9 lanceur adverse", format="%.2f"),
+                            "Indice HR (/100)": st.column_config.ProgressColumn(
+                                "Indice HR (/100)", min_value=0, max_value=100, format="%.0f"
+                            ),
+                        },
+                        hide_index=True,
+                    )
+
+                st.markdown("---")
+                st.subheader("🏃 Top 5 joueurs pour marquer un run")
+                if df_top5_runs.empty:
+                    st.info(
+                        "Pas assez de données récentes (runs sur les 10 derniers matchs) pour établir "
+                        "un classement pour le moment."
+                    )
+                else:
+                    st.dataframe(
+                        df_top5_runs,
+                        column_config={
+                            "Runs (10 derniers matchs)": st.column_config.NumberColumn("Runs (10 derniers matchs)", format="%d"),
+                            "ERA lanceur adverse": st.column_config.NumberColumn("ERA lanceur adverse", format="%.2f"),
+                            "Indice Run (/100)": st.column_config.ProgressColumn(
+                                "Indice Run (/100)", min_value=0, max_value=100, format="%.0f"
+                            ),
+                        },
+                        hide_index=True,
+                    )
+
+                st.markdown("---")
+                st.subheader("🎲 Probabilités Win/Lose du jour")
+                if df_victoires.empty:
+                    st.info("Aucune donnée de probabilité de victoire disponible pour le moment.")
+                else:
+                    st.dataframe(
+                        df_victoires,
+                        column_config={
+                            "Proba Domicile (%)": st.column_config.ProgressColumn(
+                                "Proba Domicile (%)", min_value=0, max_value=100, format="%.1f%%"
+                            ),
+                            "Proba Extérieur (%)": st.column_config.ProgressColumn(
+                                "Proba Extérieur (%)", min_value=0, max_value=100, format="%.1f%%"
+                            ),
+                        },
+                        hide_index=True,
+                    )
+
+                st.caption(
+                    "**Méthodologie** — Home Runs : HR sur les 10 derniers matchs (60%) + HR/9 du "
+                    "lanceur partant adverse annoncé (40%). Runs : runs sur les 10 derniers matchs "
+                    "(60%) + ERA du lanceur partant adverse annoncé (40%). Win/Lose : moyenne de "
+                    "runs marqués sur les 10 derniers matchs de chaque équipe + ERA/WHIP des "
+                    "lanceurs partants annoncés du jour (même modèle que l'onglet \"Prédictions du "
+                    "jour\", détaillé plus bas). npb.jp ne publiant pas de lineup officielle à "
+                    "l'avance (contrairement à MLB StatsAPI), les candidats HR/Runs sont les "
+                    "joueurs les plus en forme de chaque équipe (10 derniers matchs) plutôt que les "
+                    "titulaires confirmés du jour. Chaque indice est normalisé sur l'ensemble des "
+                    "candidats du jour, donc relatif à la journée en cours."
+                )
+
+# --------------------------------------------------------------
+# ONGLET 2: ANALYSE PAR ÉQUIPE
+# --------------------------------------------------------------
+with onglets[1]:
     st.header("📊 Analyse des Runs par Équipe")
 
     col1, col2 = st.columns([1, 3])
@@ -1516,9 +1894,9 @@ with onglets[0]:
         st.error("Impossible de charger les données. Vérifiez le code de l'équipe, ou réessayez : npb.jp peut être temporairement indisponible.")
 
 # --------------------------------------------------------------
-# ONGLET 2: PRÉDICTIONS DU JOUR
+# ONGLET 3: PRÉDICTIONS DU JOUR
 # --------------------------------------------------------------
-with onglets[1]:
+with onglets[2]:
     st.header("🔮 Prédictions du jour")
     st.markdown(f"Prédiction du match du jour pour les **{EQUIPES_NPB.get(equipe_abbr, equipe_abbr)}**")
     st.caption(
