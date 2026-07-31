@@ -896,6 +896,11 @@ def obtenir_match_du_jour(code_equipe: str):
         'est_domicile': est_domicile,
         'lanceur_notre_equipe': lanceur_notre_equipe,
         'lanceur_adverse': lanceur_adverse,
+        # Stats du lanceur de NOTRE équipe, récupérées EXACTEMENT de la même façon
+        # (symétrique) que celles du lanceur adverse ci-dessous (voir `infos_notre_lanceur`
+        # plus haut) : nécessaires au module "Probabilité de Victoire" ci-dessous, qui
+        # compare les DEUX lanceurs partants annoncés.
+        'stats_lanceur_nous': infos_notre_lanceur,
         'stats_lanceur_adverse': infos_lanceur_adverse,
         'heure_jst': heure_jst_str or "—",
         'heure_paris': heure_paris_str or "—",
@@ -1057,6 +1062,114 @@ def predire_runs_match(moyenne_runs_equipe, moyenne_ra_equipe, stats_lanceur_adv
         'total_match': round(total_runs_estime, 1),
         'confiance': confiance,
     }
+
+
+def predire_probabilite_victoire(
+    moyenne_runs_nous,
+    moyenne_offense_adverse,
+    stats_lanceur_nous,
+    stats_lanceur_adverse,
+    est_domicile: bool,
+):
+    """
+    Estimation heuristique (PAS un modèle statistique validé - aucune régression logistique
+    entraînée sur des données historiques ici, juste une pondération "de bon sens") de la
+    probabilité de victoire de l'équipe sélectionnée ("nous") face à son adversaire du jour,
+    exprimée en pourcentage pour CHAQUE équipe (les deux valeurs retournées somment à 100%).
+
+    --- Les 3 facteurs retenus, et leur pondération ---
+    1. LANCEURS PARTANTS ANNONCÉS (poids 60% dans le score combiné - facteur jugé le PLUS
+       déterminant, comme demandé : à l'échelle d'UN match de baseball, un lanceur partant
+       influence directement 5 à 7 manches sur 9, un poids qu'aucun frappeur isolé n'a à
+       lui seul). Pour chaque lanceur, on calcule un "indice de qualité" =
+       (1/ERA) * 0.7 + (1/WHIP) * 0.3 : l'ERA pèse plus car c'est la statistique la plus
+       lisible/suivie, le WHIP vient l'affiner (il capture aussi les coureurs laissés sur
+       les buts, pas seulement les points encaissés). Plus l'indice est élevé (ERA/WHIP
+       BAS), plus la probabilité penche vers l'équipe de ce lanceur. La part de chaque
+       équipe dans ce facteur est simplement son indice rapporté à la somme des deux
+       indices (ex: si notre lanceur a un indice deux fois plus élevé que l'adverse, on
+       obtient 2/3 - 1/3, PAS 100% - 0%, pour rester réaliste).
+    2. DYNAMIQUE OFFENSIVE RÉCENTE (poids 40% dans le score combiné) : moyenne de runs
+       marqués sur les 10 derniers matchs de CHAQUE équipe. Pour notre équipe, on réutilise
+       directement `moyenne_runs_10` (déjà calculé ailleurs dans l'onglet). Pour l'attaque
+       ADVERSE, faute de recharger séparément ses 10 derniers matchs (appel réseau
+       supplémentaire non indispensable dans le temps imparti), on réutilise EXACTEMENT le
+       même proxy que `predire_runs_match` juste au-dessus : la moyenne de runs CONCÉDÉS
+       par NOTRE équipe sur ses 10 derniers matchs (`moyenne_ra_10`), un indicateur
+       indirect mais raisonnable de la force offensive à laquelle notre équipe a été
+       récemment confrontée. Ce choix est documenté ici explicitement plutôt que caché.
+    3. AVANTAGE DU TERRAIN (bonus fixe de +3 points de pourcentage, PAS un facteur pondéré
+       avec les deux précédents - appliqué APRÈS le score combiné) pour l'équipe qui reçoit.
+       Valeur choisie par prudence : les études sabermétriques MLB situent le taux de
+       victoires à domicile autour de 53-54% en moyenne sur longue période (soit un
+       avantage net d'environ 3 à 4 points par rapport à un match parfaitement équilibré à
+       50/50) ; on retient ici la borne basse (+3) faute d'étude équivalente publiée
+       spécifiquement sur la NPB, pour ne pas sur-pondérer un facteur secondaire.
+
+    --- Dégradation gracieuse (données manquantes) ---
+    - Lanceur sans ERA exploitable (`stats_lanceur_nous`/`stats_lanceur_adverse` vaut None,
+      ou n'a pas de champ 'era' renseigné - cas fréquent en NPB pour un lanceur sans
+      historique cette saison, ex: recrue tout juste appelée ou joueur étranger fraîchement
+      arrivé) : ce lanceur reçoit un ERA/WHIP "neutres" (`ERA_NEUTRE`/`WHIP_NEUTRE`, des
+      moyennes de ligue approximatives), ce qui revient à neutraliser sa contribution
+      individuelle SANS jamais planter ni fausser l'estimation vers un 0%/100% trompeur.
+      Si les DEUX lanceurs manquent, le facteur 1 devient entièrement neutre (50/50), et
+      seuls les facteurs 2 et 3 continuent à jouer.
+    - Moyenne de runs manquante (`None`/`NaN`, ex: moins de 10 matchs joués cette saison) :
+      remplacée par une moyenne "neutre" (`RUNS_NEUTRE`), pour la même raison.
+    - Aucune combinaison de données manquantes ne peut faire planter cette fonction : au
+      pire (aucune donnée du tout), elle retombe sur un 50/50 + bonus domicile.
+
+    Retourne un tuple (pct_nous, pct_adverse) de deux flottants arrondis à 1 décimale dont
+    la SOMME vaut exactement 100.0, chacun bornée entre 5.0 et 95.0 : une simple heuristique
+    ne doit jamais afficher une fausse "certitude absolue" à 0% ou 100%.
+    """
+    # Valeurs "neutres" de repli (moyennes de ligue approximatives), utilisées uniquement
+    # quand une donnée réelle manque, pour neutraliser proprement le facteur concerné.
+    ERA_NEUTRE = 4.50    # ERA moyen approximatif toutes équipes NPB confondues
+    WHIP_NEUTRE = 1.35   # WHIP moyen approximatif toutes équipes NPB confondues
+    RUNS_NEUTRE = 4.50   # Runs/match moyens approximatifs en NPB
+    BONUS_DOMICILE = 3.0  # Points de pourcentage (voir justification ci-dessus)
+
+    def _indice_qualite_lanceur(stats_lanceur):
+        """Indice de qualité d'un lanceur (plus haut = meilleur), avec repli neutre."""
+        if stats_lanceur is not None and stats_lanceur.get('era'):
+            era = stats_lanceur['era']
+            whip = stats_lanceur.get('whip') or WHIP_NEUTRE
+        else:
+            era, whip = ERA_NEUTRE, WHIP_NEUTRE
+        return (1.0 / era) * 0.7 + (1.0 / whip) * 0.3
+
+    # --- Facteur 1 : lanceurs partants (poids 60%) ---
+    qualite_nous = _indice_qualite_lanceur(stats_lanceur_nous)
+    qualite_adverse = _indice_qualite_lanceur(stats_lanceur_adverse)
+    part_lanceurs_nous = qualite_nous / (qualite_nous + qualite_adverse)
+
+    # --- Facteur 2 : dynamique offensive récente (poids 40%) ---
+    runs_nous = (
+        moyenne_runs_nous if moyenne_runs_nous is not None and pd.notna(moyenne_runs_nous)
+        else RUNS_NEUTRE
+    )
+    runs_adverse = (
+        moyenne_offense_adverse if moyenne_offense_adverse is not None and pd.notna(moyenne_offense_adverse)
+        else RUNS_NEUTRE
+    )
+    somme_runs = runs_nous + runs_adverse
+    part_offense_nous = (runs_nous / somme_runs) if somme_runs > 0 else 0.5
+
+    # --- Score combiné (facteurs 1 + 2), puis conversion en pourcentage ---
+    part_combinee_nous = (part_lanceurs_nous * 0.6) + (part_offense_nous * 0.4)
+    pct_nous = part_combinee_nous * 100.0
+
+    # --- Facteur 3 : avantage du terrain (bonus fixe, appliqué après coup) ---
+    pct_nous += BONUS_DOMICILE if est_domicile else -BONUS_DOMICILE
+
+    # Bornes de sécurité (jamais 0%/100% avec une simple heuristique) + normalisation
+    # stricte à 100% (l'adversaire récupère exactement le complément).
+    pct_nous = max(5.0, min(95.0, pct_nous))
+    pct_adverse = 100.0 - pct_nous
+
+    return round(pct_nous, 1), round(pct_adverse, 1)
 
 
 def predire_joueurs_du_jour(cumul_runs_10, cumul_hr_10, stats_lanceur_adverse, top_n: int = 3):
@@ -1458,9 +1571,11 @@ with onglets[1]:
                 st.markdown(f"**{match_du_jour['adversaire']}**")
                 st.markdown(f"### {match_du_jour['lanceur_adverse'] or 'Non annoncé'}")
 
-            # Les stats du lanceur adverse (saison en cours) ont déjà été récupérées par
-            # `obtenir_match_du_jour` (en même temps que son nom romaji), il n'y a donc
-            # plus besoin d'un second appel réseau séparé ici.
+            # Les stats du lanceur adverse ET celles de NOTRE lanceur (saison en cours) ont
+            # déjà été récupérées par `obtenir_match_du_jour`, de manière SYMÉTRIQUE (même
+            # fonction `obtenir_infos_lanceur` appelée pour les deux lanceurs annoncés), il
+            # n'y a donc plus besoin d'appel réseau séparé ici pour aucun des deux camps.
+            stats_lanceur_nous = match_du_jour.get('stats_lanceur_nous')
             stats_lanceur_adverse = match_du_jour['stats_lanceur_adverse']
 
             if stats_lanceur_adverse and stats_lanceur_adverse.get('era'):
@@ -1473,15 +1588,62 @@ with onglets[1]:
             elif match_du_jour['lanceur_adverse']:
                 st.caption("Statistiques du lanceur adverse indisponibles pour le moment.")
 
+            # Moyenne de runs CONCÉDÉS par notre équipe sur ses 10 derniers matchs : calculée
+            # UNE SEULE FOIS ici, puis réutilisée à la fois par le module "Probabilité de
+            # Victoire" ci-dessous (comme proxy de l'attaque adverse, voir docstring de
+            # `predire_probabilite_victoire`) et par le module de prédiction des Runs plus
+            # bas (qui l'utilisait déjà comme proxy identique).
+            moyenne_ra_10 = pd.to_numeric(
+                df_matchs.tail(10).get('RA', pd.Series(dtype=float)), errors='coerce'
+            ).mean()
+
+            # --------------------------------------------------------------
+            # MODULE : PROBABILITÉ DE VICTOIRE
+            # --------------------------------------------------------------
+            st.markdown("---")
+            st.subheader("🎲 Probabilité de Victoire")
+
+            pct_nous, pct_adverse = predire_probabilite_victoire(
+                moyenne_runs_10,
+                moyenne_ra_10,
+                stats_lanceur_nous,
+                stats_lanceur_adverse,
+                match_du_jour['est_domicile'],
+            )
+
+            col_proba1, col_proba2 = st.columns(2)
+            with col_proba1:
+                st.metric(f"{EQUIPES_NPB.get(equipe_abbr, equipe_abbr)}", f"{pct_nous:.0f}%")
+            with col_proba2:
+                st.metric(f"{match_du_jour['adversaire']}", f"{pct_adverse:.0f}%")
+            st.progress(pct_nous / 100)
+
+            st.caption(
+                "Estimation basée sur (1) l'ERA/WHIP des lanceurs partants annoncés des deux "
+                "équipes (facteur principal), (2) la moyenne de runs marqués/concédés sur les "
+                "10 derniers matchs (dynamique offensive récente), et (3) un léger bonus de "
+                "+3 points de pourcentage pour l'équipe qui joue à domicile (~53-54% de "
+                "victoires à domicile en moyenne dans le baseball professionnel). "
+                "⚠️ Simple heuristique, PAS un modèle statistique validé : ne reflète pas "
+                "tous les facteurs d'un vrai match (composition exacte de l'équipe, bullpen, "
+                "météo, blessures de dernière minute, etc.)."
+            )
+
+            lanceur_nous_ok = bool(stats_lanceur_nous and stats_lanceur_nous.get('era'))
+            lanceur_adv_ok = bool(stats_lanceur_adverse and stats_lanceur_adverse.get('era'))
+            if not (lanceur_nous_ok and lanceur_adv_ok):
+                st.info(
+                    "ℹ️ Stats ERA/WHIP indisponibles pour au moins un des deux lanceurs "
+                    "annoncés (facteur neutralisé pour le(s) lanceur(s) concerné(s)) : "
+                    "l'estimation ci-dessus est donc moins fiable que d'habitude."
+                )
+
             st.markdown("---")
             st.subheader("📊 Module de prédiction des Runs")
 
             if moyenne_runs_10 is None:
                 st.info("Pas assez de données récentes pour estimer les runs de cette équipe.")
             else:
-                moyenne_ra_10 = pd.to_numeric(
-                    df_matchs.tail(10).get('RA', pd.Series(dtype=float)), errors='coerce'
-                ).mean()
                 prediction_runs = predire_runs_match(moyenne_runs_10, moyenne_ra_10, stats_lanceur_adverse)
 
                 col_pred1, col_pred2, col_pred3 = st.columns(3)
