@@ -1515,6 +1515,9 @@ def generer_recommandation_pari(
       La ligne de total proposée est décalée de 1.5 run (arrondi au 0,5 le plus proche)
       DANS LE SENS QUI RÉDUIT LE RISQUE : en dessous de l'estimation pour un Over, au-dessus
       pour un Under, pour se laisser une marge plutôt que de parier pile sur l'estimation brute.
+      Une phrase Over/Under est TOUJOURS générée dès que le total estimé est disponible
+      (repli : Over si projection >= seuil haut de ligue, sinon Under), y compris quand
+      l'étape 1 privilégie déjà un pari sur le vainqueur.
 
     --- Étape 3 : Option joueur (HR/Run) - universel ---
     Si un joueur du module "Prédiction des Joueurs" (nos sluggers en forme du jour,
@@ -1552,6 +1555,9 @@ def generer_recommandation_pari(
             )
 
     # --- Étape 2 : total de runs Over/Under (spécifique à la ligue) ---
+    # Toujours une phrase Over/Under dès que le total estimé est disponible, y compris
+    # quand l'étape 1 privilégie déjà un pari sur le vainqueur (favori net) : le conseil
+    # runs reste alors une option complémentaire utile.
     era_nous = _era(stats_lanceur_nous)
     era_adverse = _era(stats_lanceur_adverse)
     deux_lanceurs_connus = era_nous is not None and era_adverse is not None
@@ -1572,6 +1578,17 @@ def generer_recommandation_pari(
             ligne_under = _arrondir_au_demi(total_runs_estime + 1.5)
             conseils.append(
                 f"📉 Match très défensif anticipé. Conseil : Jouer 'Under {ligne_under} runs'."
+            )
+        elif total_runs_estime >= seuils['runs_total_haut']:
+            ligne_over = _arrondir_au_demi(total_runs_estime - 1.5)
+            conseils.append(
+                f"📈 Projection de runs au seuil haut de la ligue. Conseil : Jouer "
+                f"'Over {ligne_over} runs'."
+            )
+        else:
+            ligne_under = _arrondir_au_demi(total_runs_estime + 1.5)
+            conseils.append(
+                f"📉 Projection de runs contenue. Conseil : Jouer 'Under {ligne_under} runs'."
             )
 
     # --- Étape 3 : option joueur (universel) ---
