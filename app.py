@@ -53,15 +53,36 @@ HEADERS_HTTP = {"User-Agent": "Mozilla/5.0 (compatible; NPBStatsApp/1.0; +https:
 _SESSION = requests.Session()
 _SESSION.headers.update(HEADERS_HTTP)
 
-# Fichier local dans lequel est archivé, chaque jour, un instantané des prédictions
-# ("Hot Pronostics") du jour - nécessaire pour le "Bilan des Prédictions" de la veille
-# (onglet Résumé) : sans base de données externe, il n'existe sinon aucune trace de ce
-# que l'algorithme avait annoncé la veille une fois le jour suivant arrivé. Placé à côté
-# du script (et non dans le répertoire courant) pour fonctionner quel que soit le
-# dossier depuis lequel `streamlit run` est lancé. Fichier généré à l'exécution : listé
-# dans `.gitignore`, il n'est donc jamais versionné.
+# ------------------------------------------------------------------------------
+# Persistance de l'historique des prédictions (pour le "Bilan des Prédictions" de la
+# veille, onglet Résumé) : un instantané des prédictions du jour ("Hot Pronostics")
+# est archivé chaque jour, pour pouvoir être comparé au résultat réel le lendemain.
+#
+# Streamlit Community Cloud utilise un système de fichiers ÉPHÉMÈRE : tout fichier
+# écrit localement pendant l'exécution est PERDU à chaque redéploiement (déclenché par
+# un `git push`) ou "réveil" de l'app après une période d'inactivité. Un simple fichier
+# local ne suffit donc pas à conserver l'historique dans la durée sur cet hébergement.
+#
+# La source de vérité est donc un Gist GitHub PRIVÉ (persiste indéfiniment, quel que
+# soit le nombre de redéploiements), configuré via `st.secrets` :
+#
+#     [github]
+#     token = "ghp_..."   # Personal Access Token GitHub, scope "gist" UNIQUEMENT
+#     gist_id = "..."     # ID du Gist privé contenant historique_predictions_npb.json
+#
+# à renseigner dans `.streamlit/secrets.toml` en local, et dans les "Secrets" de l'app
+# sur share.streamlit.io en production (jamais commités : `.streamlit/secrets.toml`
+# est listé dans `.gitignore`).
+#
+# Si ces secrets ne sont pas configurés (ex: tout premier lancement, développement
+# local sans Gist créé), l'application se rabat silencieusement sur le fichier local
+# ci-dessous - fonctionnel, mais non persistant sur Streamlit Cloud. Ce fichier local
+# sert aussi de cache accessoire même quand le Gist est configuré (repli en cas de
+# panne réseau GitHub ponctuelle).
+# ------------------------------------------------------------------------------
+NOM_FICHIER_HISTORIQUE_PREDICTIONS = "historique_predictions_npb.json"
 CHEMIN_HISTORIQUE_PREDICTIONS = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "historique_predictions_npb.json"
+    os.path.dirname(os.path.abspath(__file__)), NOM_FICHIER_HISTORIQUE_PREDICTIONS
 )
 
 
@@ -100,13 +121,54 @@ def _get_soup(url: str, timeout: float = 10.0) -> BeautifulSoup:
     return BeautifulSoup(reponse.text, "html.parser")
 
 
+def _obtenir_config_github():
+    """
+    Lit la configuration GitHub (token + ID du Gist privé) dans `st.secrets`, utilisée
+    pour la persistance durable de l'historique des prédictions (cf. commentaire au-
+    dessus de `CHEMIN_HISTORIQUE_PREDICTIONS`). Retourne (token, gist_id), ou
+    (None, None) si non configuré - jamais d'exception : accéder à `st.secrets` lève
+    une erreur s'il n'existe AUCUN fichier `secrets.toml` du tout (cas du tout premier
+    lancement / développement local sans Gist configuré), qu'il faut absorber ici pour
+    retomber sur le fichier local en toute transparence.
+    """
+    try:
+        conf = st.secrets.get("github", {})
+        return conf.get("token"), conf.get("gist_id")
+    except Exception:
+        return None, None
+
+
 def _charger_historique_predictions() -> dict:
     """
-    Lit `CHEMIN_HISTORIQUE_PREDICTIONS` (fichier JSON local, un instantané par date
-    au format {'AAAA-MM-JJ': {'sauvegarde_le': ..., 'matches': [...]}}). Retourne un
-    dict vide si le fichier n'existe pas encore (premier lancement de l'application)
-    ou s'il est corrompu - ne doit jamais faire planter l'application.
+    Charge l'historique des prédictions archivées (un instantané par date, au format
+    {'AAAA-MM-JJ': {'sauvegarde_le': ..., 'matches': [...]}}) - en PRIORITÉ depuis le
+    Gist GitHub privé configuré (`_obtenir_config_github`), seule source qui survit aux
+    redéploiements sur Streamlit Community Cloud. Repli sur le fichier local
+    `CHEMIN_HISTORIQUE_PREDICTIONS` si le Gist n'est pas configuré, ou si l'appel à
+    l'API GitHub échoue (panne réseau ponctuelle, token invalide, etc.).
+
+    Retourne un dict vide si aucune des deux sources n'est disponible (ex: tout premier
+    lancement de l'application) - ne doit jamais faire planter l'application.
     """
+    token, gist_id = _obtenir_config_github()
+    if token and gist_id:
+        try:
+            reponse = requests.get(
+                f"https://api.github.com/gists/{gist_id}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                timeout=10,
+            )
+            reponse.raise_for_status()
+            fichier = reponse.json().get("files", {}).get(NOM_FICHIER_HISTORIQUE_PREDICTIONS)
+            if fichier and fichier.get("content"):
+                return json.loads(fichier["content"])
+            return {}
+        except Exception:
+            pass  # repli silencieux sur le fichier local ci-dessous
+
     try:
         with open(CHEMIN_HISTORIQUE_PREDICTIONS, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -116,18 +178,20 @@ def _charger_historique_predictions() -> dict:
 
 def _sauvegarder_predictions_du_jour(date_str: str, matches_snapshot: list) -> None:
     """
-    Archive l'instantané des prédictions du jour (`matches_snapshot`) dans
-    `CHEMIN_HISTORIQUE_PREDICTIONS`, sous la clé `date_str`. Appelée depuis
-    `construire_donnees_hot_pronostics` (donc au maximum une fois toutes les 30 min,
-    son propre `ttl` de cache) : écrire à chaque appel écrase simplement l'instantané
-    du jour par la version la plus à jour (utile si les lanceurs annoncés changent en
-    cours de journée), ce qui est le comportement recherché.
+    Archive l'instantané des prédictions du jour (`matches_snapshot`) sous la clé
+    `date_str`, à la fois dans le Gist GitHub privé configuré (source durable, cf.
+    `_obtenir_config_github`) ET dans le fichier local (repli/cache accessoire).
+    Appelée depuis `construire_donnees_hot_pronostics` (donc au maximum une fois
+    toutes les 30 min, son propre `ttl` de cache) : écrire à chaque appel écrase
+    simplement l'instantané du jour par la version la plus à jour (utile si les
+    lanceurs annoncés changent en cours de journée), ce qui est le comportement
+    recherché.
 
-    Purge au passage les entrées de plus de 30 jours, pour que ce fichier ne grossisse
-    pas indéfiniment au fil des mois. Ne lève jamais d'exception : la sauvegarde de
-    l'historique est un "bonus" (bilan de la veille) qui ne doit jamais faire planter
-    le calcul des prédictions du jour lui-même en cas de souci d'écriture disque
-    (permissions, disque plein, filesystem éphémère en environnement cloud, etc.).
+    Purge au passage les entrées de plus de 30 jours, pour que l'historique ne
+    grossisse pas indéfiniment au fil des mois. Ne lève jamais d'exception : la
+    sauvegarde de l'historique est un "bonus" (bilan de la veille) qui ne doit jamais
+    faire planter le calcul des prédictions du jour lui-même en cas de souci réseau ou
+    d'écriture disque (permissions, disque plein, filesystem éphémère, etc.).
     """
     try:
         historique = _charger_historique_predictions()
@@ -137,8 +201,26 @@ def _sauvegarder_predictions_du_jour(date_str: str, matches_snapshot: list) -> N
         }
         date_limite = (datetime.now(TZ_JST) - timedelta(days=30)).strftime('%Y-%m-%d')
         historique = {d: v for d, v in historique.items() if d >= date_limite}
+        contenu_json = json.dumps(historique, ensure_ascii=False, indent=2)
+
+        token, gist_id = _obtenir_config_github()
+        if token and gist_id:
+            try:
+                reponse = requests.patch(
+                    f"https://api.github.com/gists/{gist_id}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                    json={"files": {NOM_FICHIER_HISTORIQUE_PREDICTIONS: {"content": contenu_json}}},
+                    timeout=10,
+                )
+                reponse.raise_for_status()
+            except Exception:
+                pass  # au pire, le fichier local ci-dessous prend seul le relais
+
         with open(CHEMIN_HISTORIQUE_PREDICTIONS, "w", encoding="utf-8") as f:
-            json.dump(historique, f, ensure_ascii=False, indent=2)
+            f.write(contenu_json)
     except Exception:
         pass
 
@@ -1933,14 +2015,21 @@ def construire_bilan_veille(annee: int):
     déroulant (cf. `afficher_bilan_predictions_veille`), elle n'a aucun coût au
     chargement initial de l'onglet "Résumé".
 
-    Retourne (DataFrame, message_erreur), sur le même modèle que
-    `construire_resume_matchs_du_jour` (jamais d'exception remontée à l'appelant).
+    Retourne (DataFrame, message_erreur, predictions_disponibles) :
+      - `predictions_disponibles` (bool) indique si UN AU MOINS instantané de
+        prédictions a été retrouvé pour la date d'hier - utilisé par
+        `afficher_bilan_predictions_veille` pour distinguer "aucune prédiction n'a
+        jamais été archivée pour cette date" (cas normal les tout premiers jours après
+        l'ajout de cette fonctionnalité, ou si l'app n'a pas été ouverte la veille) du
+        cas où le tableau est simplement vide pour une autre raison.
+    Sur le même modèle que `construire_resume_matchs_du_jour`, aucune exception n'est
+    jamais remontée à l'appelant.
     """
     hier_jst = datetime.now(TZ_JST) - timedelta(days=1)
     date_hier_str = hier_jst.strftime('%Y-%m-%d')
 
     if hier_jst.month not in MOIS_SAISON:
-        return pd.DataFrame(), None  # hors saison (déc./janv./fév.) : pas de match hier
+        return pd.DataFrame(), None, True  # hors saison (déc./janv./fév.) : pas de match hier
 
     try:
         df_mois = charger_calendrier_mensuel(hier_jst.year, hier_jst.month)
@@ -1948,16 +2037,17 @@ def construire_bilan_veille(annee: int):
         return pd.DataFrame(), (
             f"Impossible de récupérer les résultats d'hier pour le moment ({e}). "
             "Réessayez en rouvrant ce menu dans quelques instants."
-        )
+        ), True
 
     if df_mois.empty:
-        return pd.DataFrame(), None
+        return pd.DataFrame(), None, True
 
     df_hier = df_mois[df_mois['Date'] == date_hier_str].dropna(subset=['score_home', 'score_away'])
     if df_hier.empty:
-        return pd.DataFrame(), None
+        return pd.DataFrame(), None, True
 
     predictions_hier = _charger_historique_predictions().get(date_hier_str, {}).get('matches', [])
+    predictions_disponibles = len(predictions_hier) > 0
     predictions_par_match = {(p.get('code_home'), p.get('code_away')): p for p in predictions_hier}
 
     ligne_ou = obtenir_ligne_over_under_saison(annee)
@@ -2006,7 +2096,7 @@ def construire_bilan_veille(annee: int):
             'Bilan': f"Victoire {icone_victoire} · Over/Under {icone_ou} · HR {icone_hr}",
         })
 
-    return pd.DataFrame(lignes), None
+    return pd.DataFrame(lignes), None, predictions_disponibles
 
 
 def afficher_bilan_predictions_veille(annee: int):
@@ -2024,19 +2114,25 @@ def afficher_bilan_predictions_veille(annee: int):
         return
 
     with st.spinner("Récupération des résultats d'hier et calcul du bilan des prédictions..."):
-        df_bilan, message_erreur = construire_bilan_veille(annee)
+        df_bilan, message_erreur, predictions_disponibles = construire_bilan_veille(annee)
 
     if message_erreur:
         st.error(f"⚠️ {message_erreur}")
         return
 
     if df_bilan.empty:
-        st.info(
-            "Aucun match NPB terminé hier (heure du Japon), ou aucune prédiction n'avait été "
-            "sauvegardée hier pour ces matchs (l'onglet Résumé ou Hot Pronostics doit avoir été "
-            "consulté au moins une fois dans la journée pour qu'un instantané soit archivé)."
-        )
+        st.info("Aucun match NPB terminé hier (heure du Japon).")
         return
+
+    if not predictions_disponibles:
+        st.info(
+            "ℹ️ Aucune prédiction n'a été archivée hier pour ces matchs, donc les colonnes de "
+            "bilan ci-dessous affichent \"Prédiction non disponible\" - les résultats réels, eux, "
+            "sont bien à jour. Cela arrive si l'application n'a pas été consultée du tout hier "
+            "(l'archivage se fait uniquement à l'ouverture de l'onglet Résumé ou Hot Pronostics), "
+            "ou si cette fonctionnalité vient tout juste d'être ajoutée : le bilan se remplira "
+            "automatiquement à partir de demain."
+        )
 
     st.dataframe(
         df_bilan,
