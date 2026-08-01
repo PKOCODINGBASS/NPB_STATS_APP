@@ -3095,31 +3095,43 @@ with onglets[3]:
                 )
 
             # --------------------------------------------------------------
-            # VALUE BET DETECTOR (cotes Winamax vs notre probabilité algorithmique)
+            # VALUE BET DETECTOR (cotes de marché vs notre probabilité algorithmique)
             # --------------------------------------------------------------
+            # Les cotes sont récupérées AVANT d'afficher le sous-titre, pour que celui-ci
+            # cite le bookmaker RÉELLEMENT utilisé (Winamax n'est que le bookmaker
+            # prioritaire - voir `ODDS_API_BOOKMAKER_PRINCIPAL` - constaté à 0% de
+            # couverture NPB chez The-Odds-API : le detector retombe systématiquement
+            # sur un autre bookmaker EU pour cette ligue).
             st.markdown("---")
-            st.subheader("💰 Value Bet Detector (vs Winamax)")
 
             cle_odds_api = _lire_cle_odds_api()
-            if not cle_odds_api:
-                st.info(
-                    "ℹ️ Value Bet Detector non configuré : ajoutez votre clé "
-                    "[The-Odds-API](https://the-odds-api.com) dans `.streamlit/secrets.toml` "
-                    "(`[odds_api]` puis `api_key = \"...\"`) pour comparer nos probabilités "
-                    "aux cotes Winamax en direct."
-                )
-            else:
+            cotes_match = None
+            if cle_odds_api:
                 cotes_du_jour = obtenir_cotes_moneyline_du_jour(ODDS_API_SPORT_KEY, cle_odds_api)
                 nom_notre_equipe = EQUIPES_NPB.get(equipe_abbr, equipe_abbr)
                 cotes_match = trouver_cote_du_match(
                     cotes_du_jour, nom_notre_equipe, match_du_jour['adversaire']
                 )
-                if not cotes_match or not cotes_match.get('cote_nous') or not cotes_match.get('cote_adverse'):
+                if cotes_match and not (cotes_match.get('cote_nous') and cotes_match.get('cote_adverse')):
+                    cotes_match = None
+
+            titre_bookmaker = f"(vs {cotes_match['bookmaker']})" if cotes_match else "(vs Winamax)"
+            st.subheader(f"💰 Value Bet Detector {titre_bookmaker}")
+
+            if not cle_odds_api:
+                st.info(
+                    "ℹ️ Value Bet Detector non configuré : ajoutez votre clé "
+                    "[The-Odds-API](https://the-odds-api.com) dans `.streamlit/secrets.toml` "
+                    "(`[odds_api]` puis `api_key = \"...\"`) pour comparer nos probabilités "
+                    "aux cotes en direct."
+                )
+            else:
+                if not cotes_match:
                     st.info(
-                        "Cotes Winamax indisponibles pour ce match pour le moment "
-                        "(marché pas encore ouvert, ou match non couvert par ce bookmaker - "
+                        "Cotes indisponibles pour ce match pour le moment "
+                        "(marché pas encore ouvert, ou match non couvert par les bookmakers suivis - "
                         "la couverture NPB est moins complète que la MLB chez la plupart des "
-                        "bookmakers)."
+                        "bookmakers, y compris Winamax)."
                     )
                 else:
                     col_cote1, col_cote2 = st.columns(2)
