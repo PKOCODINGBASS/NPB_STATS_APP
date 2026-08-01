@@ -122,6 +122,26 @@ def _get_soup(url: str, timeout: float = 10.0) -> BeautifulSoup:
     return BeautifulSoup(reponse.text, "html.parser")
 
 
+def _get_soup_scores_jour(url: str, timeout: float = 10.0) -> BeautifulSoup:
+    """
+    Variante de `_get_soup` pour les pages `https://npb.jp/scores/{annee}/{mmdd}/`.
+
+    npb.jp renvoie souvent HTTP 403 sur ces URLs alors que le corps HTML contient
+    bien la liste des matchs et scores du jour. On accepte donc 200 et 403, et on
+    échoue seulement si le HTML ne ressemble pas à une page de scores utilisable.
+    """
+    reponse = _SESSION.get(url, timeout=timeout)
+    if reponse.status_code not in (200, 403):
+        reponse.raise_for_status()
+    reponse.encoding = reponse.apparent_encoding or "utf-8"
+    if "/scores/" not in reponse.text and "score_box" not in reponse.text:
+        raise requests.HTTPError(
+            f"Page scores jour inutilisable (HTTP {reponse.status_code}) : {url}",
+            response=reponse,
+        )
+    return BeautifulSoup(reponse.text, "html.parser")
+
+
 def _obtenir_config_github():
     """
     Lit la configuration GitHub (token + ID du Gist privé) dans `st.secrets`, utilisée
@@ -448,6 +468,137 @@ def charger_calendrier_mensuel(annee: int, mois: int) -> pd.DataFrame:
         })
 
     return pd.DataFrame(lignes)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def charger_resultats_page_scores_jour(annee: int, date_str: str, cache_bust: int = 0) -> pd.DataFrame:
+    """
+    Scrape la page journalière des scores npb.jp :
+    `https://npb.jp/scores/{annee}/{mmdd}/`
+
+    Cette page est mise à jour bien plus tôt que le calendrier mensuel
+    (`schedule_MM_detail.html`), qui peut rester sans scores/liens boxscore
+    plusieurs heures après la fin des matchs (typiquement en début de journée JST
+    suivante). Utilisée en secours pour le résumé du jour et le bilan de la veille.
+
+    `cache_bust` invalide le cache Streamlit (bouton Rafraîchir). Retourne un
+    DataFrame avec code_home, code_away, score_home, score_away, box_url, termine.
+    """
+    del cache_bust  # présent uniquement pour la clé de cache Streamlit
+    try:
+        annee_d, mois_d, jour_d = date_str.split('-')
+        if int(annee_d) != int(annee):
+            return pd.DataFrame()
+        mmdd = f"{mois_d}{jour_d}"
+    except (ValueError, AttributeError):
+        return pd.DataFrame()
+
+    url = f"https://npb.jp/scores/{annee}/{mmdd}/"
+    try:
+        soup = appeler_avec_retry(_get_soup_scores_jour, url)
+    except Exception:
+        return pd.DataFrame()
+
+    lignes = []
+    for box in soup.select('div.score_box'):
+        lien = box.find('a', href=True)
+        div_score = box.find('div', class_='score')
+        if lien is None or div_score is None:
+            continue
+        href = lien['href']
+        m_href = re.search(
+            r'/scores/(\d{4})/(\d{4})/([a-z]+)-([a-z]+)-(\d+)/',
+            href,
+        )
+        if not m_href:
+            continue
+        texte_score = div_score.get_text(strip=True)
+        m_score = re.fullmatch(r'(\d+)\s*-\s*(\d+)', texte_score)
+        if not m_score:
+            continue
+        # Convention npb.jp sur cette page : score affiché = domicile - extérieur
+        # (vérifié via le linescore détaillé des fiches de match).
+        score_home, score_away = int(m_score.group(1)), int(m_score.group(2))
+        code_home, code_away = m_href.group(3), m_href.group(4)
+        box_url = "https://npb.jp" + href if href.startswith('/') else href
+        texte_box = box.get_text(' ', strip=True)
+        termine = '試合終了' in texte_box
+        lignes.append({
+            "Date": date_str,
+            "code_home": code_home,
+            "code_away": code_away,
+            "score_home": score_home,
+            "score_away": score_away,
+            "box_url": box_url,
+            "termine": termine,
+        })
+    return pd.DataFrame(lignes)
+
+
+def enrichir_calendrier_avec_scores_jour(
+    df_jour: pd.DataFrame, annee: int, date_str: str, cache_bust: int = 0
+) -> pd.DataFrame:
+    """
+    Complète un extrait de calendrier mensuel (souvent encore sans scores) avec les
+    résultats de `charger_resultats_page_scores_jour`. Si le calendrier n'a aucune
+    ligne pour la date mais que la page scores en a, on reconstruit les lignes
+    minimales à partir de cette page.
+    """
+    df_scores = charger_resultats_page_scores_jour(annee, date_str, cache_bust)
+    if df_scores.empty:
+        return df_jour.copy() if df_jour is not None else pd.DataFrame()
+
+    scores_par_match = {
+        ((r['code_home'] or '').lower(), (r['code_away'] or '').lower()): r
+        for _, r in df_scores.iterrows()
+    }
+
+    if df_jour is None or df_jour.empty:
+        lignes = []
+        for _, r in df_scores.iterrows():
+            code_home = (r['code_home'] or '').lower()
+            code_away = (r['code_away'] or '').lower()
+            lignes.append({
+                "Date": date_str,
+                "code_home": code_home,
+                "code_away": code_away,
+                "nom_home": TEAMS_NPB.get(code_home.upper(), code_home.upper()),
+                "nom_away": TEAMS_NPB.get(code_away.upper(), code_away.upper()),
+                "score_home": r['score_home'],
+                "score_away": r['score_away'],
+                "lieu": "",
+                "heure_jst": "",
+                "box_url": r['box_url'],
+                "lanceur_gagnant": "",
+                "lanceur_perdant": "",
+                "lanceur_annonce_home": "",
+                "lanceur_annonce_away": "",
+                "termine_scores": bool(r.get('termine')),
+            })
+        return pd.DataFrame(lignes)
+
+    df = df_jour.copy()
+    if 'termine_scores' not in df.columns:
+        df['termine_scores'] = False
+    for idx, g in df.iterrows():
+        cle = ((g.get('code_home') or '').lower(), (g.get('code_away') or '').lower())
+        r = scores_par_match.get(cle)
+        if r is None:
+            continue
+        score_home_actuel, score_away_actuel = g.get('score_home'), g.get('score_away')
+        scores_absents = pd.isna(score_home_actuel) or pd.isna(score_away_actuel)
+        if scores_absents:
+            df.at[idx, 'score_home'] = r['score_home']
+            df.at[idx, 'score_away'] = r['score_away']
+        # Attention : une cellule vide du calendrier mensuel est souvent NaN (truthy
+        # en Python), pas None/"" — `not nan` serait donc faux et laisserait box_url
+        # vide, bloquant le scrape des scoreurs / HR.
+        box_actuel = g.get('box_url')
+        if not (isinstance(box_actuel, str) and box_actuel.strip()):
+            df.at[idx, 'box_url'] = r['box_url']
+        if r.get('termine'):
+            df.at[idx, 'termine_scores'] = True
+    return df
 
 
 @st.cache_data(show_spinner=False, ttl=1800)
@@ -938,20 +1089,29 @@ def calculer_resume_10_derniers_matchs(df_derniers: pd.DataFrame):
 
 
 @st.cache_data(show_spinner=False, ttl=300)
-def obtenir_calendrier_du_jour_jst():
+def obtenir_calendrier_du_jour_jst(cache_bust: int = 0):
     """
     Récupère le calendrier NPB de la date du jour AU JAPON (fuseau JST), pas la date
     française. C'est le cœur de l'adaptation du fuseau horaire : au moment où un
     utilisateur français ouvre l'application le matin, il est déjà "demain après-midi/
     soir" au Japon la plupart du temps, donc interroger le calendrier NPB avec la date
     française donnerait très souvent le mauvais jour de match (voire aucun match).
+
+    Enrichit systématiquement avec la page `/scores/{annee}/{mmdd}/`, plus réactive
+    que le calendrier mensuel lorsque les scores viennent d'être publiés.
     """
     maintenant_jst = datetime.now(TZ_JST)
-    df_mois = charger_calendrier_mensuel(maintenant_jst.year, maintenant_jst.month)
-    if df_mois.empty:
-        return pd.DataFrame(), maintenant_jst
     date_str = maintenant_jst.strftime('%Y-%m-%d')
-    return df_mois[df_mois['Date'] == date_str].copy(), maintenant_jst
+    df_mois = charger_calendrier_mensuel(maintenant_jst.year, maintenant_jst.month)
+    df_jour = (
+        df_mois[df_mois['Date'] == date_str].copy()
+        if not df_mois.empty
+        else pd.DataFrame()
+    )
+    df_jour = enrichir_calendrier_avec_scores_jour(
+        df_jour, maintenant_jst.year, date_str, cache_bust
+    )
+    return df_jour, maintenant_jst
 
 
 @st.cache_data(show_spinner=False, ttl=1800)
@@ -2134,17 +2294,28 @@ def construire_donnees_hot_pronostics(annee: int):
 # le reste (bouton de rafraîchissement, colonnes du tableau, comparatif avec l'algo
 # de prédiction) est repris à l'identique.
 
-def _formater_statut_match_npb(score_home, score_away, lanceur_gagnant: str, lanceur_perdant: str) -> str:
+def _formater_statut_match_npb(
+    score_home,
+    score_away,
+    lanceur_gagnant: str,
+    lanceur_perdant: str,
+    termine_scores: bool = False,
+) -> str:
     """
     Détermine le statut d'un match NPB à partir des colonnes déjà scrapées par
     `charger_calendrier_mensuel` (mêmes règles que celles déjà utilisées par
     `obtenir_match_du_jour` pour le match de l'équipe sélectionnée, généralisées ici à
     N'IMPORTE QUEL match du jour) : "Terminé" si une décision (lanceur gagnant/perdant)
-    a déjà été publiée, "En cours" si un score est déjà affiché mais sans décision
-    encore publiée, "À venir" si aucun score n'est encore affiché.
+    a déjà été publiée OU si la page `/scores/` marque « 試合終了 », "En cours" si un
+    score est déjà affiché mais sans décision encore publiée, "À venir" si aucun score
+    n'est encore affiché.
     """
     if pd.notna(score_home) and pd.notna(score_away):
-        if (lanceur_gagnant or '').strip() or (lanceur_perdant or '').strip():
+        if (
+            bool(termine_scores)
+            or (lanceur_gagnant or '').strip()
+            or (lanceur_perdant or '').strip()
+        ):
             return "Terminé"
         return "En cours"
     return "À venir"
@@ -2231,7 +2402,7 @@ def construire_resume_matchs_du_jour(annee: int, cache_bust: int = 0):
         return pd.DataFrame(), None
 
     try:
-        df_jour, _ = obtenir_calendrier_du_jour_jst()
+        df_jour, _ = obtenir_calendrier_du_jour_jst(cache_bust)
     except Exception as e:
         return pd.DataFrame(), (
             f"Impossible de récupérer les scores en direct pour le moment ({e}). "
@@ -2270,7 +2441,11 @@ def construire_resume_matchs_du_jour(annee: int, cache_bust: int = 0):
 
         score_home, score_away = g.get('score_home'), g.get('score_away')
         statut_str = _formater_statut_match_npb(
-            score_home, score_away, g.get('lanceur_gagnant'), g.get('lanceur_perdant')
+            score_home,
+            score_away,
+            g.get('lanceur_gagnant'),
+            g.get('lanceur_perdant'),
+            bool(g.get('termine_scores')),
         )
         a_commence = statut_str in ("Terminé", "En cours")
 
@@ -2393,8 +2568,8 @@ def _bilan_over_under(total_runs_predit, total_runs_reel: int, ligne: float):
     ), icone
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def construire_bilan_veille(annee: int):
+@st.cache_data(show_spinner=False, ttl=300)
+def construire_bilan_veille(annee: int, date_hier_str: str, cache_bust: int = 0):
     """
     Construit le tableau "Résultats de la veille et Bilan des Prédictions" : reprend
     la structure du tableau des matchs du jour (`construire_resume_matchs_du_jour`),
@@ -2402,6 +2577,11 @@ def construire_bilan_veille(annee: int):
     enrichi de colonnes de bilan comparant la prédiction sauvegardée hier
     (`_sauvegarder_predictions_du_jour`, appelée automatiquement depuis
     `construire_donnees_hot_pronostics`) au résultat réel.
+
+    `date_hier_str` fait partie de la clé de cache (sinon un bilan d'avant-hier
+    restait servi après le changement de jour JST). `cache_bust` invalide le cache
+    via le bouton Rafraîchir. Les scores sont enrichis via la page journalière
+    `/scores/` car le calendrier mensuel npb.jp est souvent en retard.
 
     Comme cette fonction n'est appelée QUE lorsque l'utilisateur ouvre le menu
     déroulant (cf. `afficher_bilan_predictions_veille`), elle n'a aucun coût au
@@ -2417,24 +2597,35 @@ def construire_bilan_veille(annee: int):
     Sur le même modèle que `construire_resume_matchs_du_jour`, aucune exception n'est
     jamais remontée à l'appelant.
     """
-    hier_jst = datetime.now(TZ_JST) - timedelta(days=1)
-    date_hier_str = hier_jst.strftime('%Y-%m-%d')
+    try:
+        hier_jst = datetime.strptime(date_hier_str, '%Y-%m-%d').replace(tzinfo=TZ_JST)
+    except (TypeError, ValueError):
+        hier_jst = datetime.now(TZ_JST) - timedelta(days=1)
+        date_hier_str = hier_jst.strftime('%Y-%m-%d')
 
     if hier_jst.month not in MOIS_SAISON:
         return pd.DataFrame(), None, True  # hors saison (déc./janv./fév.) : pas de match hier
 
     try:
         df_mois = charger_calendrier_mensuel(hier_jst.year, hier_jst.month)
+        df_hier_brut = (
+            df_mois[df_mois['Date'] == date_hier_str].copy()
+            if not df_mois.empty
+            else pd.DataFrame()
+        )
+        df_hier_brut = enrichir_calendrier_avec_scores_jour(
+            df_hier_brut, hier_jst.year, date_hier_str, cache_bust
+        )
     except Exception as e:
         return pd.DataFrame(), (
             f"Impossible de récupérer les résultats d'hier pour le moment ({e}). "
             "Réessayez en rouvrant ce menu dans quelques instants."
         ), True
 
-    if df_mois.empty:
+    if df_hier_brut.empty:
         return pd.DataFrame(), None, True
 
-    df_hier = df_mois[df_mois['Date'] == date_hier_str].dropna(subset=['score_home', 'score_away'])
+    df_hier = df_hier_brut.dropna(subset=['score_home', 'score_away'])
     if df_hier.empty:
         return pd.DataFrame(), None, True
 
@@ -2469,10 +2660,10 @@ def construire_bilan_veille(annee: int):
         total_reel = home_score + away_score
 
         runs_home, hr_home = obtenir_scoreurs_runs_et_hr_match_jour(
-            g.get('box_url'), True, date_hier_str, code_home, code_away
+            g.get('box_url'), True, date_hier_str, code_home, code_away, cache_bust
         )
         runs_away, hr_away = obtenir_scoreurs_runs_et_hr_match_jour(
-            g.get('box_url'), False, date_hier_str, code_home, code_away
+            g.get('box_url'), False, date_hier_str, code_home, code_away, cache_bust
         )
 
         pred = predictions_par_match.get((code_home, code_away))
@@ -2500,7 +2691,7 @@ def construire_bilan_veille(annee: int):
     return pd.DataFrame(lignes), None, predictions_disponibles
 
 
-def afficher_bilan_predictions_veille(annee: int):
+def afficher_bilan_predictions_veille(annee: int, cache_bust: int = 0):
     """
     Corps du menu déroulant "📅 Résultats de la veille et Bilan des Prédictions" :
     appelé uniquement quand ce menu est ouvert (cf. garde `expander.open` dans
@@ -2514,8 +2705,11 @@ def afficher_bilan_predictions_veille(annee: int):
         )
         return
 
+    date_hier_str = (datetime.now(TZ_JST) - timedelta(days=1)).strftime('%Y-%m-%d')
     with st.spinner("Récupération des résultats d'hier et calcul du bilan des prédictions..."):
-        df_bilan, message_erreur, predictions_disponibles = construire_bilan_veille(annee)
+        df_bilan, message_erreur, predictions_disponibles = construire_bilan_veille(
+            annee, date_hier_str, cache_bust
+        )
 
     if message_erreur:
         st.error(f"⚠️ {message_erreur}")
@@ -2576,25 +2770,34 @@ def afficher_onglet_resume(annee: int):
     # propriété `.open` dynamique (True/False selon l'état du menu) : le contenu
     # (requête réseau vers npb.jp incluse) n'est donc calculé QUE si l'utilisateur a
     # effectivement déplié le menu, jamais au chargement initial de l'onglet.
+    if 'resume_cache_bust' not in st.session_state:
+        st.session_state.resume_cache_bust = 0
+    if 'resume_derniere_actualisation' not in st.session_state:
+        st.session_state.resume_derniere_actualisation = None
+
     expander_veille = st.expander(
         "📅 Résultats de la veille et Bilan des Prédictions", on_change="rerun"
     )
     if expander_veille.open:
         with expander_veille:
-            afficher_bilan_predictions_veille(annee)
+            afficher_bilan_predictions_veille(annee, st.session_state.resume_cache_bust)
 
     st.markdown("---")
-
-    if 'resume_cache_bust' not in st.session_state:
-        st.session_state.resume_cache_bust = 0
-    if 'resume_derniere_actualisation' not in st.session_state:
-        st.session_state.resume_derniere_actualisation = None
 
     col_bouton, col_info = st.columns([1, 2])
     with col_bouton:
         if st.button("🔄 Rafraîchir les scores en direct"):
             st.session_state.resume_cache_bust += 1
             st.session_state.resume_derniere_actualisation = datetime.now(TZ_PARIS)
+            # Invalide aussi les caches du calendrier mensuel / page scores / bilan
+            # pour forcer une relecture npb.jp (le calendrier mensuel peut rester
+            # vide de scores plusieurs heures après la fin des matchs).
+            try:
+                charger_calendrier_mensuel.clear()
+                charger_resultats_page_scores_jour.clear()
+                construire_bilan_veille.clear()
+            except Exception:
+                pass
 
     with col_info:
         if st.session_state.resume_derniere_actualisation:
