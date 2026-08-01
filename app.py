@@ -1492,9 +1492,14 @@ def generer_recommandation_pari(
     Objectif affiché à l'utilisateur : minimiser le risque, pas maximiser le gain.
 
     --- Étape 1 : Risque sur le résultat (Win/Loss) - universel, toutes ligues ---
-    Si l'écart entre les deux probabilités de victoire est inférieur à 10 points, le
-    match est jugé "à Haut Risque" sur le vainqueur : on recommande de préférer un pari
-    sur les runs plutôt que sur le résultat (moins dépendant d'un seul évènement).
+    Évalue systématiquement la "qualité" du match du point de vue du pari vainqueur
+    (une phrase est TOUJOURS générée à cette étape, contrairement aux étapes 2 et 3) :
+      - Si l'écart entre les deux probabilités de victoire est inférieur à 10 points, le
+        match est jugé "à Haut Risque" sur le vainqueur : on recommande de préférer un
+        pari sur les runs plutôt que sur le résultat (moins dépendant d'un seul évènement).
+      - Sinon (écart >= 10 points, un favori se dégage nettement), le match est jugé
+        "à Faible Risque" sur le vainqueur : un pari sur le résultat est alors présenté
+        comme une option plus fiable qu'un pari sur les runs.
 
     --- Étape 2 : Total de runs (Over/Under) - seuils spécifiques à la ligue ---
     Seuils lus dans `SEUILS_PARIS_PAR_LIGUE[ligue]` (repli sur `LIGUE_PAR_DEFAUT` si la
@@ -1531,12 +1536,18 @@ def generer_recommandation_pari(
 
     conseils = []
 
-    # --- Étape 1 : risque Win/Loss (universel) ---
+    # --- Étape 1 : risque Win/Loss (universel) - toujours une phrase, dans un sens ou l'autre ---
     if pct_nous is not None and pct_adverse is not None:
         if abs(pct_nous - pct_adverse) < 10:
             conseils.append(
                 "⚠️ Match serré (Haut Risque sur la victoire). Privilégiez un pari sur "
                 "les Runs plutôt que sur le vainqueur."
+            )
+        else:
+            favori = "notre équipe" if pct_nous > pct_adverse else "l'équipe adverse"
+            conseils.append(
+                f"✅ Écart de probabilité net en faveur de {favori} (Faible Risque sur la "
+                "victoire). Un pari sur le vainqueur est ici plus fiable qu'un pari sur les Runs."
             )
 
     # --- Étape 2 : total de runs Over/Under (spécifique à la ligue) ---
