@@ -685,6 +685,113 @@ def _get_noms_romaji_match(url_anglais: str, est_domicile: bool):
     return noms
 
 
+# Hiragana, katakana (plein/demi-chasse), kanji CJK : détecte un nom encore "japonais"
+# après échec de la substitution via la fiche de match anglaise.
+_RE_ECRITURE_JAPONAISE = re.compile(
+    r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff66-\uff9f]'
+)
+
+
+def _contient_ecriture_japonaise(texte: str) -> bool:
+    """True si `texte` contient encore des caractères japonais (kanji/kana)."""
+    return bool(texte and _RE_ECRITURE_JAPONAISE.search(texte))
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def charger_urls_anglais_jour(annee: int, date_str: str, cache_bust: int = 0) -> dict:
+    """
+    Scrape la page journalière anglaise `gmYYYYMMDD.html` pour récupérer les URLs des
+    fiches de match ENG, souvent disponibles avant que le calendrier mensuel anglais
+    (`index_MM.html`) ne soit mis à jour avec les scores.
+
+    Retourne un dict {(code_home, code_away): url_anglais}.
+    """
+    del cache_bust
+    try:
+        y, m, d = date_str.split('-')
+        if int(y) != int(annee):
+            return {}
+        mmdd = f"{y}{m}{d}"
+    except (ValueError, AttributeError):
+        return {}
+
+    url = f"https://npb.jp/bis/eng/{annee}/games/gm{mmdd}.html"
+    try:
+        soup = appeler_avec_retry(_get_soup, url)
+    except Exception:
+        return {}
+
+    resultat = {}
+    for lien in soup.select('a[href*="/games/s20"]'):
+        href = lien.get('href') or ''
+        if not re.search(r'/games/s\d+\.html', href):
+            continue
+        imgs = lien.select('img[src*="logo_"]')
+        codes = []
+        for img in imgs:
+            m_code = re.search(r'logo_([a-z]+)_', img.get('src', ''))
+            if m_code:
+                codes.append(m_code.group(1))
+        if len(codes) < 2:
+            continue
+        # Convention de la page : team_left = domicile, team_right = extérieur
+        code_home, code_away = codes[0], codes[1]
+        url_match = "https://npb.jp" + href if href.startswith('/') else href
+        resultat[(code_home, code_away)] = url_match
+    return resultat
+
+
+def _resoudre_url_anglais_match(date_str: str, code_home: str, code_away: str,
+                                 cache_bust: int = 0) -> str | None:
+    """
+    Résout l'URL de la fiche de match anglaise : calendrier mensuel ENG d'abord, puis
+    page journalière `gmYYYYMMDD.html` en secours (même retard possible que le
+    calendrier japonais mensuel).
+    """
+    if not date_str or not code_home or not code_away:
+        return None
+    try:
+        annee = int(date_str.split('-')[0])
+        mois = int(date_str.split('-')[1])
+    except (ValueError, AttributeError, IndexError):
+        return None
+
+    code_home, code_away = code_home.lower(), code_away.lower()
+    urls_mois = charger_urls_anglais_mensuel(annee, mois)
+    url = urls_mois.get((date_str, code_home, code_away))
+    if url:
+        return url
+    urls_jour = charger_urls_anglais_jour(annee, date_str, cache_bust)
+    return urls_jour.get((code_home, code_away))
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def obtenir_nom_famille_romaji_joueur(id_joueur: str):
+    """
+    Nom de famille romanisé officiel via la fiche joueur anglaise npb.jp
+    (`/bis/eng/players/{id}.html`, élément `#pc_v_name`, ex: "Sekine, Taiki" -> "Sekine").
+
+    Secours quand la fiche de match anglaise n'est pas encore publiée (cas fréquent
+    juste après la fin des matchs) : les IDs joueurs sont déjà dans le boxscore JP.
+    """
+    if not id_joueur:
+        return None
+    url = f"https://npb.jp/bis/eng/players/{id_joueur}.html"
+    try:
+        soup = appeler_avec_retry(_get_soup, url)
+    except Exception:
+        return None
+    li_nom = soup.find('li', id='pc_v_name')
+    if li_nom is None:
+        return None
+    nom_complet = li_nom.get_text(strip=True)
+    if not nom_complet:
+        return None
+    # "Katsumata, Atsushi" / "Katsumata,Atsushi" -> nom de famille (comme sur les
+    # fiches de match ENG : "Dalbec, 3B-1B" -> "Dalbec").
+    return nom_complet.split(',')[0].strip() or None
+
+
 @st.cache_data(show_spinner=False, ttl=1800)
 def charger_donnees_equipe(annee: int = None, equipe_abbr: str = None) -> pd.DataFrame:
     """
@@ -797,15 +904,12 @@ def _scraper_stats_offensives_match(box_url: str, est_domicile: bool, date_str: 
 
     --- Noms de joueurs en ROMAJI (alphabet latin) ---
     La page japonaise ne donne les noms qu'en kanji/kana. Si `date_str`, `code_home`
-    et `code_away` sont fournis, cette fonction va chercher la fiche de match
-    ANGLAISE correspondante (`charger_urls_anglais_mensuel` + `_get_noms_romaji_match`)
-    et, si elle liste EXACTEMENT le même nombre de batteurs dans le même ordre (ce qui
-    est le cas en pratique : même ordre de passage au bâton des deux côtés), remplace
-    les noms japonais par leur équivalent romaji officiel ligne par ligne - PAS de
-    transcription phonétique automatique (peu fiable, notamment pour les joueurs
-    étrangers en katakana), mais bien le nom romanisé publié par npb.jp lui-même.
-    En cas d'échec (page indisponible, décompte différent), on retombe silencieusement
-    sur les noms japonais plutôt que de planter l'affichage.
+    et `code_away` sont fournis, on tente d'abord la fiche de match ANGLAISE
+    (`_resoudre_url_anglais_match` + `_get_noms_romaji_match`) pour substituer
+    ligne par ligne. Si elle n'est pas encore publiée (fréquent pour le bilan de
+    la veille), secours via chaque fiche joueur ENG (`obtenir_nom_famille_romaji_joueur`)
+    à partir de l'id présent dans le boxscore JP — toujours le romaji officiel
+    npb.jp, jamais de transcription phonétique. En dernier recours, noms japonais.
     """
     if not box_url:
         return []
@@ -838,6 +942,12 @@ def _scraper_stats_offensives_match(box_url: str, est_domicile: bool, date_str: 
         if not nom:
             continue
 
+        id_joueur = None
+        href_joueur = lien_joueur.get('href') or ''
+        m_id = re.search(r'/bis/players/(\d+)\.html', href_joueur)
+        if m_id:
+            id_joueur = m_id.group(1)
+
         try:
             runs = int(tds[4].get_text(strip=True) or 0)
         except ValueError:
@@ -846,20 +956,42 @@ def _scraper_stats_offensives_match(box_url: str, est_domicile: bool, date_str: 
         cellules_manches = tds[8:]
         hr = sum(1 for td in cellules_manches if '本' in td.get_text())
 
-        lignes_ordonnees.append({'name': nom, 'runs': runs, 'hr': hr})
+        lignes_ordonnees.append({
+            'name': nom,
+            'runs': runs,
+            'hr': hr,
+            'player_id': id_joueur,
+        })
 
     # --- Substitution par les noms romaji officiels (si disponibles) ---
+    # 1) Fiche de match anglaise (calendrier mensuel ENG, puis page jour gmYYYYMMDD)
     if date_str and code_home and code_away:
         try:
-            mois = int(date_str.split('-')[1])
-            urls_anglais = charger_urls_anglais_mensuel(int(date_str.split('-')[0]), mois)
-            url_anglais = urls_anglais.get((date_str, code_home, code_away))
+            url_anglais = _resoudre_url_anglais_match(date_str, code_home, code_away)
             noms_romaji = _get_noms_romaji_match(url_anglais, est_domicile) if url_anglais else []
             if noms_romaji and len(noms_romaji) == len(lignes_ordonnees):
                 for ligne, nom_romaji in zip(lignes_ordonnees, noms_romaji):
                     ligne['name'] = nom_romaji
         except Exception:
             pass  # on garde les noms japonais en repli, jamais d'erreur bloquante ici
+
+    # 2) Secours par fiche joueur ENG (`/bis/eng/players/{id}`) : indispensable quand
+    # la fiche de match anglaise n'est pas encore en ligne (souvent le cas pour le
+    # bilan de la veille / scores tout juste publiés). On ne requête que les joueurs
+    # affichés (runs ou HR > 0) pour limiter le nombre d'appels réseau.
+    for ligne in lignes_ordonnees:
+        if ligne['runs'] <= 0 and ligne['hr'] <= 0:
+            continue
+        if not _contient_ecriture_japonaise(ligne['name']):
+            continue
+        if not ligne.get('player_id'):
+            continue
+        try:
+            nom_romaji = obtenir_nom_famille_romaji_joueur(ligne['player_id'])
+        except Exception:
+            nom_romaji = None
+        if nom_romaji:
+            ligne['name'] = nom_romaji
 
     # Fusion des statistiques par nom final (romaji si dispo, japonais sinon), au cas
     # où un même joueur apparaîtrait sur plusieurs lignes (remplacement puis retour, etc.)
@@ -2795,7 +2927,9 @@ def afficher_onglet_resume(annee: int):
             try:
                 charger_calendrier_mensuel.clear()
                 charger_resultats_page_scores_jour.clear()
+                charger_urls_anglais_jour.clear()
                 construire_bilan_veille.clear()
+                obtenir_scoreurs_runs_et_hr_match_jour.clear()
             except Exception:
                 pass
 
