@@ -1731,7 +1731,7 @@ def trouver_cote_du_match(cotes_du_jour: list, nom_notre_equipe: str, nom_advers
     return None
 
 
-def evaluer_value_bet(proba_algo_pct, cote, nom_equipe: str):
+def evaluer_value_bet(proba_algo_pct, cote, nom_equipe: str, nom_bookmaker: str = "Winamax"):
     """
     Compare notre probabilité de victoire estimée (`proba_algo_pct`, calculée par
     `predire_probabilite_victoire`) à la probabilité IMPLICITE de la cote de marché
@@ -1748,6 +1748,14 @@ def evaluer_value_bet(proba_algo_pct, cote, nom_equipe: str):
       - Entre les deux : cote jugée "juste" (badge gris ⚪), pas d'avantage
         mathématique net dans un sens ou l'autre.
 
+    --- IMPORTANT : `nom_bookmaker` ---
+    Winamax ne couvre PAS tous les matchs de toutes les ligues (constaté : 0% de
+    couverture NPB chez The-Odds-API, contre 100% en MLB). `trouver_cote_du_match`
+    retombe alors sur un autre bookmaker EU disponible (voir `ODDS_API_BOOKMAKER_PRINCIPAL`)
+    - le message doit donc TOUJOURS citer le bookmaker RÉELLEMENT utilisé (`cotes_match
+    ['bookmaker']` côté appelant), jamais "Winamax" en dur, pour ne jamais afficher une
+    fausse attribution.
+
     Retourne un tuple (niveau, message) où niveau vaut 'value', 'juste' ou 'evitez',
     ou (None, None) si la cote n'est pas exploitable (absente ou <= 1.0) ou si la
     probabilité de l'algo est inconnue.
@@ -1760,16 +1768,16 @@ def evaluer_value_bet(proba_algo_pct, cote, nom_equipe: str):
 
     if value >= 5:
         return 'value', (
-            f"🟢 🔥 Value Bet détectée ! Winamax sous-évalue {nom_equipe} "
+            f"🟢 🔥 Value Bet détectée ! {nom_bookmaker} sous-évalue {nom_equipe} "
             f"(Cote : {cote:.2f}, Value : +{value:.1f}%)."
         )
     if value <= -5:
         return 'evitez', (
-            f"🔴 ⛔ Ne pas jouer la Win sur {nom_equipe}. La cote de Winamax "
+            f"🔴 ⛔ Ne pas jouer la Win sur {nom_equipe}. La cote de {nom_bookmaker} "
             f"({cote:.2f}) est trop basse par rapport à nos estimations (Value : {value:.1f}%)."
         )
     return 'juste', (
-        f"⚪ ⚖️ Cote juste (Fair Value) sur {nom_equipe} (Cote : {cote:.2f}). "
+        f"⚪ ⚖️ Cote juste (Fair Value) sur {nom_equipe} (Cote : {cote:.2f}, {nom_bookmaker}). "
         "Pas d'avantage mathématique majeur."
     )
 
@@ -3121,8 +3129,12 @@ with onglets[3]:
                         st.metric(f"Cote {match_du_jour['adversaire']}", f"{cotes_match['cote_adverse']:.2f}")
 
                     for niveau, message in (
-                        evaluer_value_bet(pct_nous, cotes_match['cote_nous'], nom_notre_equipe),
-                        evaluer_value_bet(pct_adverse, cotes_match['cote_adverse'], match_du_jour['adversaire']),
+                        evaluer_value_bet(
+                            pct_nous, cotes_match['cote_nous'], nom_notre_equipe, cotes_match['bookmaker']
+                        ),
+                        evaluer_value_bet(
+                            pct_adverse, cotes_match['cote_adverse'], match_du_jour['adversaire'], cotes_match['bookmaker']
+                        ),
                     ):
                         if not message:
                             continue
