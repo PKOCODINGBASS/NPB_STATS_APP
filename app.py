@@ -22,9 +22,11 @@ import pandas as pd             # Manipulation de données (tableaux)
 import altair as alt            # Graphiques avancés (ligne de moyenne annotée)
 import re                       # Extraction des noms/runs et parsing HTML ciblé
 import time                     # Délais/backoff entre les appels réseau
+import json                     # Sérialisation de l'historique des prédictions (bilan de la veille)
+import os                       # Chemin du fichier d'historique des prédictions
 import requests                 # Appels HTTP vers npb.jp (scraping)
 from bs4 import BeautifulSoup   # Parsing HTML des pages npb.jp
-from datetime import datetime   # Gestion des dates
+from datetime import datetime, timedelta  # Gestion des dates (timedelta : calcul de "hier")
 from zoneinfo import ZoneInfo   # Gestion des fuseaux horaires (JST <-> heure française)
 
 # ============================================================
@@ -50,6 +52,17 @@ HEADERS_HTTP = {"User-Agent": "Mozilla/5.0 (compatible; NPBStatsApp/1.0; +https:
 
 _SESSION = requests.Session()
 _SESSION.headers.update(HEADERS_HTTP)
+
+# Fichier local dans lequel est archivé, chaque jour, un instantané des prédictions
+# ("Hot Pronostics") du jour - nécessaire pour le "Bilan des Prédictions" de la veille
+# (onglet Résumé) : sans base de données externe, il n'existe sinon aucune trace de ce
+# que l'algorithme avait annoncé la veille une fois le jour suivant arrivé. Placé à côté
+# du script (et non dans le répertoire courant) pour fonctionner quel que soit le
+# dossier depuis lequel `streamlit run` est lancé. Fichier généré à l'exécution : listé
+# dans `.gitignore`, il n'est donc jamais versionné.
+CHEMIN_HISTORIQUE_PREDICTIONS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "historique_predictions_npb.json"
+)
 
 
 def appeler_avec_retry(fonction, *args, tentatives: int = 3, delai_base: float = 0.5, **kwargs):
@@ -85,6 +98,49 @@ def _get_soup(url: str, timeout: float = 10.0) -> BeautifulSoup:
     reponse.raise_for_status()
     reponse.encoding = reponse.apparent_encoding or "utf-8"
     return BeautifulSoup(reponse.text, "html.parser")
+
+
+def _charger_historique_predictions() -> dict:
+    """
+    Lit `CHEMIN_HISTORIQUE_PREDICTIONS` (fichier JSON local, un instantané par date
+    au format {'AAAA-MM-JJ': {'sauvegarde_le': ..., 'matches': [...]}}). Retourne un
+    dict vide si le fichier n'existe pas encore (premier lancement de l'application)
+    ou s'il est corrompu - ne doit jamais faire planter l'application.
+    """
+    try:
+        with open(CHEMIN_HISTORIQUE_PREDICTIONS, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _sauvegarder_predictions_du_jour(date_str: str, matches_snapshot: list) -> None:
+    """
+    Archive l'instantané des prédictions du jour (`matches_snapshot`) dans
+    `CHEMIN_HISTORIQUE_PREDICTIONS`, sous la clé `date_str`. Appelée depuis
+    `construire_donnees_hot_pronostics` (donc au maximum une fois toutes les 30 min,
+    son propre `ttl` de cache) : écrire à chaque appel écrase simplement l'instantané
+    du jour par la version la plus à jour (utile si les lanceurs annoncés changent en
+    cours de journée), ce qui est le comportement recherché.
+
+    Purge au passage les entrées de plus de 30 jours, pour que ce fichier ne grossisse
+    pas indéfiniment au fil des mois. Ne lève jamais d'exception : la sauvegarde de
+    l'historique est un "bonus" (bilan de la veille) qui ne doit jamais faire planter
+    le calcul des prédictions du jour lui-même en cas de souci d'écriture disque
+    (permissions, disque plein, filesystem éphémère en environnement cloud, etc.).
+    """
+    try:
+        historique = _charger_historique_predictions()
+        historique[date_str] = {
+            'sauvegarde_le': datetime.now(TZ_JST).isoformat(),
+            'matches': matches_snapshot,
+        }
+        date_limite = (datetime.now(TZ_JST) - timedelta(days=30)).strftime('%Y-%m-%d')
+        historique = {d: v for d, v in historique.items() if d >= date_limite}
+        with open(CHEMIN_HISTORIQUE_PREDICTIONS, "w", encoding="utf-8") as f:
+            json.dump(historique, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -1403,6 +1459,29 @@ def _calculer_top5_runs_npb(candidats: list) -> pd.DataFrame:
     ]]
 
 
+def _total_runs_predit(resume_home, resume_away):
+    """
+    Total de runs projeté pour un match = somme des moyennes de runs marqués par
+    chaque équipe sur ses 10 derniers matchs. Sert de projection "Over/Under" dans le
+    bilan des prédictions de la veille (cf. `obtenir_ligne_over_under_saison`).
+    Retourne None si l'une des deux moyennes n'est pas disponible.
+    """
+    if not resume_home or not resume_away:
+        return None
+    moyenne_home = resume_home.get('moyenne_runs')
+    moyenne_away = resume_away.get('moyenne_runs')
+    if moyenne_home is None or moyenne_away is None or pd.isna(moyenne_home) or pd.isna(moyenne_away):
+        return None
+    return round(float(moyenne_home) + float(moyenne_away), 2)
+
+
+def _top_candidats_hr(resume_camp, n: int = 2) -> list:
+    """Les `n` joueurs les plus en forme au HR (10 derniers matchs) d'une équipe."""
+    if not resume_camp or not resume_camp.get('cumul_hr'):
+        return []
+    return [nom for nom, _ in sorted(resume_camp['cumul_hr'].items(), key=lambda x: x[1], reverse=True)[:n]]
+
+
 @st.cache_data(show_spinner=False, ttl=1800)
 def construire_donnees_hot_pronostics(annee: int):
     """
@@ -1555,6 +1634,29 @@ def construire_donnees_hot_pronostics(annee: int):
     df_top5_hr = _calculer_top5_home_runs_npb(candidats_hr)
     df_top5_runs = _calculer_top5_runs_npb(candidats_runs)
     df_victoires = pd.DataFrame(lignes_victoire)
+
+    # --- Archivage de l'instantané du jour (pour le "Bilan des Prédictions" de la
+    # veille, onglet Résumé, cf. `_sauvegarder_predictions_du_jour`) : on ne conserve
+    # que ce qui est nécessaire à une comparaison ultérieure avec le résultat réel une
+    # fois le match terminé (probabilité de victoire, total de runs projeté pour les
+    # deux équipes, et candidats HR les plus en forme de chaque équipe).
+    matches_snapshot = [
+        {
+            'code_home': m['code_home'],
+            'code_away': m['code_away'],
+            'home_name': m['home_name'],
+            'away_name': m['away_name'],
+            'proba_home': ligne_victoire.get('Proba Domicile (%)'),
+            'proba_away': ligne_victoire.get('Proba Extérieur (%)'),
+            'total_runs_predit': _total_runs_predit(
+                resumes_equipe.get(m['code_home']), resumes_equipe.get(m['code_away'])
+            ),
+            'candidats_hr_home': _top_candidats_hr(resumes_equipe.get(m['code_home'])),
+            'candidats_hr_away': _top_candidats_hr(resumes_equipe.get(m['code_away'])),
+        }
+        for m, ligne_victoire in zip(matchs_du_jour, lignes_victoire)
+    ]
+    _sauvegarder_predictions_du_jour(maintenant_jst.strftime('%Y-%m-%d'), matches_snapshot)
 
     return matchs_du_jour, df_top5_hr, df_top5_runs, df_victoires
 
@@ -1735,14 +1837,260 @@ def construire_resume_matchs_du_jour(annee: int, cache_bust: int = 0):
     return pd.DataFrame(lignes), None
 
 
+# ------------------------------------------------------------------------------
+# BILAN DES PRÉDICTIONS DE LA VEILLE (menu déroulant en tête de l'onglet "Résumé")
+# ------------------------------------------------------------------------------
+# npb.jp ne publie aucune ligne de paris officielle (contrairement aux sites de paris
+# sportifs) : à défaut, la "ligne" Over/Under utilisée ci-dessous pour qualifier un
+# match de "à forte marque" (Over) ou "à faible marque" (Under) est la moyenne réelle
+# de runs cumulés (les deux équipes confondues) sur tous les matchs déjà joués cette
+# saison - la référence la plus neutre et la plus objective disponible sans source de
+# paris tierce.
+@st.cache_data(show_spinner=False, ttl=3600)
+def obtenir_ligne_over_under_saison(annee: int) -> float:
+    """
+    Moyenne de runs totaux (2 équipes cumulées) sur tous les matchs NPB déjà joués
+    cette saison, tous mois confondus - sert de ligne de référence Over/Under pour le
+    bilan des prédictions de la veille. Repli à 7.5 (ordre de grandeur usuel en NPB)
+    si aucune donnée n'est encore disponible (tout début de saison).
+    """
+    totaux = []
+    for mois in MOIS_SAISON:
+        try:
+            df_mois = charger_calendrier_mensuel(annee, mois)
+        except Exception:
+            continue
+        if df_mois.empty:
+            continue
+        df_valides = df_mois.dropna(subset=['score_home', 'score_away'])
+        if df_valides.empty:
+            continue
+        totaux.extend((df_valides['score_home'] + df_valides['score_away']).tolist())
+
+    if not totaux:
+        return 7.5
+    return round(sum(totaux) / len(totaux), 2)
+
+
+def _formater_vainqueur(nom_home: str, nom_away: str, home_score: int, away_score: int) -> str:
+    """Nom de l'équipe gagnante, ou 'Match nul' (matchs NPB pouvant se terminer sur une égalité)."""
+    if home_score == away_score:
+        return "Match nul"
+    return nom_home if home_score > away_score else nom_away
+
+
+def _bilan_victoire(proba_home, proba_away, nom_home: str, nom_away: str, home_score: int, away_score: int):
+    """Retourne (texte, icône) comparant l'équipe favorite annoncée hier à la gagnante réelle."""
+    if proba_home is None or proba_away is None or pd.isna(proba_home) or pd.isna(proba_away):
+        return "Prédiction non disponible", "⏳"
+    if home_score == away_score:
+        return "Match nul (pas de favori confirmé)", "⏳"
+    favori = nom_home if proba_home >= proba_away else nom_away
+    pct_favori = max(proba_home, proba_away)
+    gagnant = nom_home if home_score > away_score else nom_away
+    icone = "✅" if favori == gagnant else "❌"
+    return f"{favori} favori à {pct_favori:.0f}% → vainqueur : {gagnant}", icone
+
+
+def _bilan_over_under(total_runs_predit, total_runs_reel: int, ligne: float):
+    """Retourne (texte, icône) comparant la projection Over/Under d'hier au total réel."""
+    if total_runs_predit is None:
+        return "Prédiction non disponible", "⏳"
+    direction_predite = "Over" if total_runs_predit > ligne else "Under"
+    direction_reelle = "Over" if total_runs_reel > ligne else "Under"
+    icone = "✅" if direction_predite == direction_reelle else "❌"
+    return (
+        f"{direction_predite} annoncé (projection {total_runs_predit:.1f}, ligne {ligne:.1f}) "
+        f"→ réel {total_runs_reel} ({direction_reelle})"
+    ), icone
+
+
+def _bilan_hr(candidats_home: list, candidats_away: list, hr_home_reels: list, hr_away_reels: list):
+    """Retourne (texte, icône) : au moins un des joueurs surveillés hier a-t-il réellement frappé un HR ?"""
+    candidats = [c for c in (candidats_home or []) + (candidats_away or []) if c]
+    if not candidats:
+        return "Prédiction non disponible", "⏳"
+    scoreurs_reels = {nom for nom, _ in hr_home_reels} | {nom for nom, _ in hr_away_reels}
+    touches = [c for c in candidats if c in scoreurs_reels]
+    icone = "✅" if touches else "❌"
+    texte = f"Surveillés : {', '.join(candidats)}"
+    if touches:
+        texte += f" → a frappé : {', '.join(touches)}"
+    return texte, icone
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def construire_bilan_veille(annee: int):
+    """
+    Construit le tableau "Résultats de la veille et Bilan des Prédictions" : reprend
+    la structure du tableau des matchs du jour (`construire_resume_matchs_du_jour`),
+    mais pour la date d'HIER (heure du Japon) et avec les matchs forcément terminés,
+    enrichi de colonnes de bilan comparant la prédiction sauvegardée hier
+    (`_sauvegarder_predictions_du_jour`, appelée automatiquement depuis
+    `construire_donnees_hot_pronostics`) au résultat réel.
+
+    Comme cette fonction n'est appelée QUE lorsque l'utilisateur ouvre le menu
+    déroulant (cf. `afficher_bilan_predictions_veille`), elle n'a aucun coût au
+    chargement initial de l'onglet "Résumé".
+
+    Retourne (DataFrame, message_erreur), sur le même modèle que
+    `construire_resume_matchs_du_jour` (jamais d'exception remontée à l'appelant).
+    """
+    hier_jst = datetime.now(TZ_JST) - timedelta(days=1)
+    date_hier_str = hier_jst.strftime('%Y-%m-%d')
+
+    if hier_jst.month not in MOIS_SAISON:
+        return pd.DataFrame(), None  # hors saison (déc./janv./fév.) : pas de match hier
+
+    try:
+        df_mois = charger_calendrier_mensuel(hier_jst.year, hier_jst.month)
+    except Exception as e:
+        return pd.DataFrame(), (
+            f"Impossible de récupérer les résultats d'hier pour le moment ({e}). "
+            "Réessayez en rouvrant ce menu dans quelques instants."
+        )
+
+    if df_mois.empty:
+        return pd.DataFrame(), None
+
+    df_hier = df_mois[df_mois['Date'] == date_hier_str].dropna(subset=['score_home', 'score_away'])
+    if df_hier.empty:
+        return pd.DataFrame(), None
+
+    predictions_hier = _charger_historique_predictions().get(date_hier_str, {}).get('matches', [])
+    predictions_par_match = {(p.get('code_home'), p.get('code_away')): p for p in predictions_hier}
+
+    ligne_ou = obtenir_ligne_over_under_saison(annee)
+
+    lignes = []
+    for _, g in df_hier.iterrows():
+        code_home = (g.get('code_home') or '').lower()
+        code_away = (g.get('code_away') or '').lower()
+        if not code_home or not code_away:
+            continue
+
+        nom_home = TEAMS_NPB.get(code_home.upper(), g.get('nom_home') or '?')
+        nom_away = TEAMS_NPB.get(code_away.upper(), g.get('nom_away') or '?')
+        home_abbr, away_abbr = code_home.upper(), code_away.upper()
+
+        try:
+            home_score, away_score = int(g['score_home']), int(g['score_away'])
+        except (TypeError, ValueError):
+            continue
+        total_reel = home_score + away_score
+
+        hr_home = obtenir_hr_joueurs_match_jour(g.get('box_url'), True, date_hier_str, code_home, code_away)
+        hr_away = obtenir_hr_joueurs_match_jour(g.get('box_url'), False, date_hier_str, code_home, code_away)
+
+        pred = predictions_par_match.get((code_home, code_away))
+        candidats_hr_home = pred.get('candidats_hr_home', []) if pred else []
+        candidats_hr_away = pred.get('candidats_hr_away', []) if pred else []
+        proba_home = pred.get('proba_home') if pred else None
+        proba_away = pred.get('proba_away') if pred else None
+        total_predit = pred.get('total_runs_predit') if pred else None
+
+        texte_victoire, icone_victoire = _bilan_victoire(proba_home, proba_away, nom_home, nom_away, home_score, away_score)
+        texte_ou, icone_ou = _bilan_over_under(total_predit, total_reel, ligne_ou)
+        texte_hr, icone_hr = _bilan_hr(candidats_hr_home, candidats_hr_away, hr_home, hr_away)
+
+        lignes.append({
+            'Match': f"{nom_away} vs {nom_home}",
+            'Statut': "Terminé",
+            'Score': f"{away_abbr} {away_score} - {home_abbr} {home_score}",
+            'Total Runs': str(total_reel),
+            'Home Runs': _formater_cellule_hr(away_abbr, hr_away, home_abbr, hr_home),
+            'Vainqueur': _formater_vainqueur(nom_home, nom_away, home_score, away_score),
+            'Victoire prédite': texte_victoire,
+            'Over/Under prédit': texte_ou,
+            'HR surveillés': texte_hr,
+            'Bilan': f"Victoire {icone_victoire} · Over/Under {icone_ou} · HR {icone_hr}",
+        })
+
+    return pd.DataFrame(lignes), None
+
+
+def afficher_bilan_predictions_veille(annee: int):
+    """
+    Corps du menu déroulant "📅 Résultats de la veille et Bilan des Prédictions" :
+    appelé uniquement quand ce menu est ouvert (cf. garde `expander.open` dans
+    `afficher_onglet_resume`), donc sans coût réseau tant que l'utilisateur ne l'a
+    pas déplié.
+    """
+    if annee != ANNEE_COURANTE:
+        st.info(
+            f"Le bilan de la veille n'est disponible que pour la saison en cours "
+            f"({ANNEE_COURANTE})."
+        )
+        return
+
+    with st.spinner("Récupération des résultats d'hier et calcul du bilan des prédictions..."):
+        df_bilan, message_erreur = construire_bilan_veille(annee)
+
+    if message_erreur:
+        st.error(f"⚠️ {message_erreur}")
+        return
+
+    if df_bilan.empty:
+        st.info(
+            "Aucun match NPB terminé hier (heure du Japon), ou aucune prédiction n'avait été "
+            "sauvegardée hier pour ces matchs (l'onglet Résumé ou Hot Pronostics doit avoir été "
+            "consulté au moins une fois dans la journée pour qu'un instantané soit archivé)."
+        )
+        return
+
+    st.dataframe(
+        df_bilan,
+        column_config={
+            "Match": st.column_config.TextColumn("Match", width="medium"),
+            "Statut": st.column_config.TextColumn("Statut", width="small"),
+            "Score": st.column_config.TextColumn("Score", width="small"),
+            "Total Runs": st.column_config.TextColumn("Total Runs", width="small"),
+            "Home Runs": st.column_config.TextColumn("Home Runs", width="large"),
+            "Vainqueur": st.column_config.TextColumn("Vainqueur", width="medium"),
+            "Victoire prédite": st.column_config.TextColumn("Victoire prédite", width="large"),
+            "Over/Under prédit": st.column_config.TextColumn("Over/Under prédit", width="large"),
+            "HR surveillés": st.column_config.TextColumn("HR surveillés", width="large"),
+            "Bilan": st.column_config.TextColumn("Bilan", width="large"),
+        },
+        hide_index=True,
+    )
+
+    st.caption(
+        "**Méthodologie** — Victoire : ✅ si l'équipe favorite (probabilité la plus haute) a "
+        "réellement gagné. Over/Under : ligne de référence = moyenne réelle de runs cumulés par "
+        "match sur la saison en cours ; ✅ si notre projection (moyenne de runs des 10 derniers "
+        "matchs des deux équipes) était du même côté de cette ligne que le résultat réel. HR : ✅ "
+        "si au moins un des joueurs les plus en forme au HR (10 derniers matchs) de chaque équipe "
+        "a effectivement frappé un home run dans ce match. ⏳ = aucune prédiction n'avait été "
+        "archivée pour ce match (application non consultée la veille) ou match nul. Les "
+        "prédictions ne sont archivées qu'au moment où l'onglet Résumé ou Hot Pronostics est "
+        "consulté ce jour-là (pas de calcul en tâche de fond)."
+    )
+
+
 @st.fragment
 def afficher_onglet_resume(annee: int):
     """
-    Corps de l'onglet "Résumé" (bouton de rafraîchissement + tableau), encapsulé dans
-    un `st.fragment` : cliquer sur le bouton ne relance QUE cette fonction (nouveau
-    scraping + reconstruction du tableau), sans recharger le reste de l'application
-    (sidebar, autres onglets) ni la page web entière.
+    Corps de l'onglet "Résumé" (menu déroulant "Bilan de la veille" + bouton de
+    rafraîchissement + tableau du jour), encapsulé dans un `st.fragment` : cliquer sur
+    le bouton, ou ouvrir/fermer le menu déroulant, ne relance QUE cette fonction, sans
+    recharger le reste de l'application (sidebar, autres onglets) ni la page web
+    entière.
     """
+    # --- Menu déroulant "Bilan des Prédictions" de la veille, tout en haut de
+    # l'onglet, au-dessus du tableau des matchs du jour. `on_change="rerun"` rend la
+    # propriété `.open` dynamique (True/False selon l'état du menu) : le contenu
+    # (requête réseau vers npb.jp incluse) n'est donc calculé QUE si l'utilisateur a
+    # effectivement déplié le menu, jamais au chargement initial de l'onglet.
+    expander_veille = st.expander(
+        "📅 Résultats de la veille et Bilan des Prédictions", on_change="rerun"
+    )
+    if expander_veille.open:
+        with expander_veille:
+            afficher_bilan_predictions_veille(annee)
+
+    st.markdown("---")
+
     if 'resume_cache_bust' not in st.session_state:
         st.session_state.resume_cache_bust = 0
     if 'resume_derniere_actualisation' not in st.session_state:
