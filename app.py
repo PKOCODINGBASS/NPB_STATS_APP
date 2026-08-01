@@ -24,7 +24,8 @@ import re                       # Extraction des noms/runs et parsing HTML cibl�
 import time                     # Délais/backoff entre les appels réseau
 import json                     # Sérialisation de l'historique des prédictions (bilan de la veille)
 import os                       # Chemin du fichier d'historique des prédictions
-import requests                 # Appels HTTP vers npb.jp (scraping)
+import requests                 # Appels HTTP vers npb.jp (scraping) et The-Odds-API (Value Bet)
+import unicodedata              # Normalisation des noms d'équipe (Value Bet Detector)
 from bs4 import BeautifulSoup   # Parsing HTML des pages npb.jp
 from datetime import datetime, timedelta  # Gestion des dates (timedelta : calcul de "hier")
 from zoneinfo import ZoneInfo   # Gestion des fuseaux horaires (JST <-> heure française)
@@ -1585,6 +1586,194 @@ def generer_recommandation_pari(
     return conseils
 
 
+# --------------------------------------------------------------
+# VALUE BET DETECTOR (comparaison avec les cotes Winamax / marché)
+# --------------------------------------------------------------
+# Source de cotes : The-Odds-API (https://the-odds-api.com), qui agrège de nombreux
+# bookmakers dont Winamax (clé bookmaker 'winamax_fr', région 'eu') - Winamax n'ayant
+# pas d'API publique/officielle, passer par cet agrégateur évite le scraping direct de
+# leur site (fragile et probablement contraire à leurs CGU) tout en donnant accès à
+# leurs cotes réelles quand ce bookmaker couvre le match.
+#
+# ⚠️ Contrairement à la MLB, la couverture NPB de The-Odds-API/Winamax dépend fortement
+# du calendrier/de la popularité du match : il est normal que certains matchs NPB
+# n'aient AUCUNE cote disponible (le detector l'affiche alors clairement, sans planter).
+ODDS_API_BASE_URL = 'https://api.the-odds-api.com/v4'
+ODDS_API_SPORT_KEY = 'baseball_npb'
+ODDS_API_BOOKMAKER_PRINCIPAL = 'winamax_fr'
+# Région de repli si Winamax ne propose pas (encore) de cote sur ce match précis -
+# on retombe alors sur le 1er bookmaker EU disponible plutôt que d'afficher
+# "indisponible" alors qu'une cote de marché existe ailleurs.
+ODDS_API_REGION = 'eu'
+
+
+def _lire_cle_odds_api():
+    """
+    Lit la clé API The-Odds-API dans `st.secrets` (section [odds_api], clé `api_key`),
+    utilisée par le "Value Bet Detector". Retourne None si non configurée - jamais
+    d'exception : accéder à `st.secrets` lève une erreur si le fichier secrets.toml
+    n'existe pas du tout, d'où le `try/except` (même pattern que la config GitHub
+    utilisée pour la persistance de l'historique des prédictions).
+    """
+    try:
+        conf = st.secrets.get("odds_api", {})
+        return conf.get("api_key")
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def obtenir_cotes_moneyline_du_jour(sport_key: str, api_key: str):
+    """
+    Récupère, via The-Odds-API, les cotes "Moneyline" (marché h2h = vainqueur du
+    match, sans handicap) de TOUS les matchs à venir aujourd'hui pour le sport/ligue
+    demandé (`sport_key`, ici 'baseball_npb'), en priorité chez Winamax
+    (`ODDS_API_BOOKMAKER_PRINCIPAL`). Si Winamax ne propose pas ce marché pour un
+    match donné, on retombe sur le 1er bookmaker EU disponible pour ce match plutôt
+    que de le considérer comme "indisponible" alors qu'une cote de marché existe.
+
+    Mise en cache 30 minutes : le quota gratuit de The-Odds-API est limité (500
+    requêtes/mois), inutile de rappeler l'API à chaque interaction utilisateur pour
+    des cotes qui ne bougent pas d'une minute à l'autre.
+
+    Retourne une liste de dicts {'equipe_domicile', 'equipe_exterieur',
+    'cote_domicile', 'cote_exterieur', 'bookmaker'} (une entrée par match), ou []
+    si la clé API n'est pas configurée, si la NPB n'est pas couverte aujourd'hui
+    (aucun match trouvé côté bookmakers), ou en cas d'erreur réseau/API (ex: quota
+    dépassé) - jamais d'exception remontée à l'appelant.
+    """
+    if not api_key or not sport_key:
+        return []
+    try:
+        reponse = requests.get(
+            f"{ODDS_API_BASE_URL}/sports/{sport_key}/odds",
+            params={
+                'apiKey': api_key,
+                'regions': ODDS_API_REGION,
+                'markets': 'h2h',
+                'oddsFormat': 'decimal',
+            },
+            timeout=10,
+        )
+        reponse.raise_for_status()
+        matchs_api = reponse.json()
+    except Exception:
+        return []
+
+    resultats = []
+    for match in matchs_api:
+        bookmakers = match.get('bookmakers') or []
+        bookmaker_retenu = next(
+            (b for b in bookmakers if b.get('key') == ODDS_API_BOOKMAKER_PRINCIPAL),
+            bookmakers[0] if bookmakers else None,
+        )
+        if not bookmaker_retenu:
+            continue
+        marche_h2h = next(
+            (m for m in bookmaker_retenu.get('markets', []) if m.get('key') == 'h2h'), None
+        )
+        if not marche_h2h or len(marche_h2h.get('outcomes', [])) < 2:
+            continue
+        cotes_par_equipe = {o.get('name'): o.get('price') for o in marche_h2h['outcomes']}
+        resultats.append({
+            'equipe_domicile': match.get('home_team'),
+            'equipe_exterieur': match.get('away_team'),
+            'cote_domicile': cotes_par_equipe.get(match.get('home_team')),
+            'cote_exterieur': cotes_par_equipe.get(match.get('away_team')),
+            'bookmaker': bookmaker_retenu.get('title') or bookmaker_retenu.get('key'),
+        })
+    return resultats
+
+
+def _normaliser_nom_equipe(texte: str) -> str:
+    """Normalise un nom d'équipe (minuscules, sans accents) pour une comparaison assouplie."""
+    return unicodedata.normalize('NFKD', texte or '').encode('ascii', 'ignore').decode().lower().strip()
+
+
+def trouver_cote_du_match(cotes_du_jour: list, nom_notre_equipe: str, nom_adversaire: str):
+    """
+    Retrouve, dans la liste retournée par `obtenir_cotes_moneyline_du_jour`, le match
+    correspondant à notre équipe/adversaire du jour, et renvoie la cote de CHAQUE
+    équipe ainsi que le bookmaker utilisé. La correspondance se fait par comparaison
+    "assouplie" (sous-chaîne, insensible à la casse/accents) plutôt qu'une égalité
+    stricte : les noms d'équipe fournis par The-Odds-API (romaji, ex: "Yomiuri
+    Giants") ne correspondent pas toujours mot pour mot aux noms utilisés ailleurs
+    dans l'app (`TEAMS_NPB`).
+
+    Retourne un dict {'cote_nous', 'cote_adverse', 'bookmaker'}, ou None si aucun
+    match correspondant n'a été trouvé (NPB non couverte pour ce match précis par
+    Winamax/les bookmakers EU, ou marché pas encore ouvert aux paris).
+    """
+    nous = _normaliser_nom_equipe(nom_notre_equipe)
+    adverse = _normaliser_nom_equipe(nom_adversaire)
+    if not nous or not adverse:
+        return None
+
+    def _correspond(a, b):
+        return bool(a) and bool(b) and (a in b or b in a)
+
+    for match in cotes_du_jour:
+        dom = _normaliser_nom_equipe(match.get('equipe_domicile'))
+        ext = _normaliser_nom_equipe(match.get('equipe_exterieur'))
+
+        if _correspond(nous, dom) and _correspond(adverse, ext):
+            return {
+                'cote_nous': match.get('cote_domicile'),
+                'cote_adverse': match.get('cote_exterieur'),
+                'bookmaker': match.get('bookmaker'),
+            }
+        if _correspond(nous, ext) and _correspond(adverse, dom):
+            return {
+                'cote_nous': match.get('cote_exterieur'),
+                'cote_adverse': match.get('cote_domicile'),
+                'bookmaker': match.get('bookmaker'),
+            }
+    return None
+
+
+def evaluer_value_bet(proba_algo_pct, cote, nom_equipe: str):
+    """
+    Compare notre probabilité de victoire estimée (`proba_algo_pct`, calculée par
+    `predire_probabilite_victoire`) à la probabilité IMPLICITE de la cote de marché
+    (`cote`, au format décimal), pour détecter une éventuelle "Value Bet".
+
+    Probabilité implicite = (1 / cote) * 100.
+    Value = Proba_Algo - Proba_Implicite.
+
+    Seuils (identiques pour toutes les ligues - écart de probabilité brut, indépendant
+    du profil offensif de la ligue) :
+      - Value >= +5 points : le marché sous-évalue cette équipe (badge vert 🟢).
+      - Value <= -5 points : le marché la sur-évalue par rapport à notre modèle,
+        mieux vaut éviter un pari vainqueur sur cette équipe (badge rouge 🔴).
+      - Entre les deux : cote jugée "juste" (badge gris ⚪), pas d'avantage
+        mathématique net dans un sens ou l'autre.
+
+    Retourne un tuple (niveau, message) où niveau vaut 'value', 'juste' ou 'evitez',
+    ou (None, None) si la cote n'est pas exploitable (absente ou <= 1.0) ou si la
+    probabilité de l'algo est inconnue.
+    """
+    if not cote or cote <= 1.0 or proba_algo_pct is None:
+        return None, None
+
+    proba_implicite = (1.0 / cote) * 100.0
+    value = proba_algo_pct - proba_implicite
+
+    if value >= 5:
+        return 'value', (
+            f"🟢 🔥 Value Bet détectée ! Winamax sous-évalue {nom_equipe} "
+            f"(Cote : {cote:.2f}, Value : +{value:.1f}%)."
+        )
+    if value <= -5:
+        return 'evitez', (
+            f"🔴 ⛔ Ne pas jouer la Win sur {nom_equipe}. La cote de Winamax "
+            f"({cote:.2f}) est trop basse par rapport à nos estimations (Value : {value:.1f}%)."
+        )
+    return 'juste', (
+        f"⚪ ⚖️ Cote juste (Fair Value) sur {nom_equipe} (Cote : {cote:.2f}). "
+        "Pas d'avantage mathématique majeur."
+    )
+
+
 def _normaliser_colonne(serie: pd.Series) -> pd.Series:
     """
     Normalisation min-max dans [0, 1] d'une colonne de statistiques, pour pouvoir
@@ -2896,6 +3085,59 @@ with onglets[3]:
                     "annoncés (facteur neutralisé pour le(s) lanceur(s) concerné(s)) : "
                     "l'estimation ci-dessus est donc moins fiable que d'habitude."
                 )
+
+            # --------------------------------------------------------------
+            # VALUE BET DETECTOR (cotes Winamax vs notre probabilité algorithmique)
+            # --------------------------------------------------------------
+            st.markdown("---")
+            st.subheader("💰 Value Bet Detector (vs Winamax)")
+
+            cle_odds_api = _lire_cle_odds_api()
+            if not cle_odds_api:
+                st.info(
+                    "ℹ️ Value Bet Detector non configuré : ajoutez votre clé "
+                    "[The-Odds-API](https://the-odds-api.com) dans `.streamlit/secrets.toml` "
+                    "(`[odds_api]` puis `api_key = \"...\"`) pour comparer nos probabilités "
+                    "aux cotes Winamax en direct."
+                )
+            else:
+                cotes_du_jour = obtenir_cotes_moneyline_du_jour(ODDS_API_SPORT_KEY, cle_odds_api)
+                nom_notre_equipe = EQUIPES_NPB.get(equipe_abbr, equipe_abbr)
+                cotes_match = trouver_cote_du_match(
+                    cotes_du_jour, nom_notre_equipe, match_du_jour['adversaire']
+                )
+                if not cotes_match or not cotes_match.get('cote_nous') or not cotes_match.get('cote_adverse'):
+                    st.info(
+                        "Cotes Winamax indisponibles pour ce match pour le moment "
+                        "(marché pas encore ouvert, ou match non couvert par ce bookmaker - "
+                        "la couverture NPB est moins complète que la MLB chez la plupart des "
+                        "bookmakers)."
+                    )
+                else:
+                    col_cote1, col_cote2 = st.columns(2)
+                    with col_cote1:
+                        st.metric(f"Cote {nom_notre_equipe}", f"{cotes_match['cote_nous']:.2f}")
+                    with col_cote2:
+                        st.metric(f"Cote {match_du_jour['adversaire']}", f"{cotes_match['cote_adverse']:.2f}")
+
+                    for niveau, message in (
+                        evaluer_value_bet(pct_nous, cotes_match['cote_nous'], nom_notre_equipe),
+                        evaluer_value_bet(pct_adverse, cotes_match['cote_adverse'], match_du_jour['adversaire']),
+                    ):
+                        if not message:
+                            continue
+                        if niveau == 'value':
+                            st.success(message)
+                        elif niveau == 'evitez':
+                            st.error(message)
+                        else:
+                            st.info(message)
+
+                    st.caption(
+                        f"Cotes Moneyline (marché h2h) fournies par {cotes_match['bookmaker']} "
+                        "via The-Odds-API. Probabilité implicite = (1 / cote) × 100 ; "
+                        "Value = notre probabilité algorithmique − probabilité implicite du marché."
+                    )
 
             st.markdown("---")
             st.subheader("📊 Module de prédiction des Runs")
