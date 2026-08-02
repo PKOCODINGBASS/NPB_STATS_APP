@@ -1,0 +1,455 @@
+/* ============================================================
+   PARIS SPORTIFS — Design System (base)
+   Les variables --ps-* sont injectées dynamiquement par theme.py
+   selon la ligue active (mlb | npb | kbo).
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&display=swap');
+
+:root {
+  --ps-radius: 14px;
+  --ps-radius-sm: 10px;
+  --ps-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  --ps-shadow-soft: 0 2px 10px rgba(15, 23, 42, 0.05);
+  --ps-font: 'Outfit', 'Segoe UI', sans-serif;
+  --ps-font-display: 'Source Serif 4', Georgia, serif;
+}
+
+html, body, [data-testid="stAppViewContainer"], .stApp {
+  font-family: var(--ps-font) !important;
+  background:
+    radial-gradient(1200px 500px at 10% -10%, var(--ps-glow) 0%, transparent 55%),
+    linear-gradient(180deg, var(--ps-bg) 0%, #ffffff 45%, var(--ps-bg) 100%) !important;
+  color: var(--ps-text);
+}
+
+/* Masque le décor Streamlit trop « prototype » */
+[data-testid="stHeader"] {
+  background: transparent !important;
+}
+
+[data-testid="stToolbar"] {
+  right: 1rem;
+}
+
+/* ---- Hero / en-tête de page ---- */
+.ps-hero {
+  position: relative;
+  margin: 0 0 1.4rem 0;
+  padding: 1.55rem 1.7rem 1.45rem;
+  border-radius: calc(var(--ps-radius) + 4px);
+  background: var(--ps-header-grad);
+  color: var(--ps-on-primary);
+  box-shadow: var(--ps-shadow);
+  overflow: hidden;
+}
+
+.ps-hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(120deg, transparent 40%, rgba(255,255,255,0.08) 100%);
+  pointer-events: none;
+}
+
+.ps-hero__eyebrow {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.85;
+  margin: 0 0 0.45rem 0;
+}
+
+.ps-hero__brand {
+  font-family: var(--ps-font-display);
+  font-size: clamp(1.7rem, 2.6vw, 2.35rem);
+  font-weight: 700;
+  line-height: 1.15;
+  margin: 0 0 0.45rem 0;
+  letter-spacing: -0.02em;
+}
+
+.ps-hero__tagline {
+  margin: 0;
+  max-width: 46rem;
+  font-size: 1.02rem;
+  line-height: 1.45;
+  opacity: 0.92;
+  font-weight: 400;
+}
+
+/* ---- Titres de section ---- */
+.ps-section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0.35rem 0 0.85rem 0;
+}
+
+.ps-section-title__bar {
+  width: 4px;
+  height: 1.35rem;
+  border-radius: 999px;
+  background: var(--ps-secondary);
+  flex-shrink: 0;
+}
+
+.ps-section-title__text {
+  font-family: var(--ps-font-display);
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--ps-primary);
+  margin: 0;
+  letter-spacing: -0.015em;
+}
+
+.ps-section-sub {
+  color: var(--ps-muted);
+  margin: -0.35rem 0 1rem 0;
+  font-size: 0.98rem;
+}
+
+/* ---- Cartes match ---- */
+.ps-match-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 1rem;
+  margin: 0.4rem 0 1.1rem 0;
+}
+
+.ps-match-card {
+  background: var(--ps-card-bg);
+  border: 1px solid var(--ps-border);
+  border-radius: var(--ps-radius);
+  box-shadow: var(--ps-shadow-soft);
+  padding: 1.05rem 1.15rem 1rem;
+  transition: transform 160ms ease, box-shadow 160ms ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.ps-match-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: linear-gradient(180deg, var(--ps-primary), var(--ps-secondary));
+}
+
+.ps-match-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--ps-shadow);
+}
+
+.ps-match-card__top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 0.7rem;
+}
+
+.ps-match-card__title {
+  font-weight: 650;
+  font-size: 1.05rem;
+  color: var(--ps-primary);
+  margin: 0;
+  line-height: 1.3;
+}
+
+.ps-match-card__score {
+  font-family: var(--ps-font-display);
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--ps-text);
+  margin: 0.15rem 0 0.55rem 0;
+  letter-spacing: -0.02em;
+}
+
+.ps-match-card__meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem 0.75rem;
+  margin-top: 0.35rem;
+}
+
+.ps-match-card__meta-item {
+  background: var(--ps-chip-bg);
+  border-radius: var(--ps-radius-sm);
+  padding: 0.45rem 0.6rem;
+}
+
+.ps-match-card__meta-label {
+  display: block;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ps-muted);
+  margin-bottom: 0.15rem;
+  font-weight: 600;
+}
+
+.ps-match-card__meta-value {
+  font-size: 0.9rem;
+  color: var(--ps-text);
+  font-weight: 500;
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.ps-match-card__footer {
+  margin-top: 0.75rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* ---- Badges ---- */
+.ps-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.28rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.ps-badge--status {
+  background: color-mix(in srgb, var(--ps-primary) 12%, white);
+  color: var(--ps-primary);
+  border-color: color-mix(in srgb, var(--ps-primary) 22%, white);
+}
+
+.ps-badge--win {
+  background: color-mix(in srgb, var(--ps-success) 16%, white);
+  color: var(--ps-success);
+  border-color: color-mix(in srgb, var(--ps-success) 28%, white);
+}
+
+.ps-badge--loss {
+  background: color-mix(in srgb, var(--ps-danger) 14%, white);
+  color: var(--ps-danger);
+  border-color: color-mix(in srgb, var(--ps-danger) 26%, white);
+}
+
+.ps-badge--pending {
+  background: #F3F4F6;
+  color: #4B5563;
+  border-color: #E5E7EB;
+}
+
+.ps-badge--value {
+  background: color-mix(in srgb, var(--ps-success) 18%, white);
+  color: var(--ps-success);
+  border-color: color-mix(in srgb, var(--ps-success) 30%, white);
+}
+
+.ps-badge--avoid {
+  background: color-mix(in srgb, var(--ps-danger) 16%, white);
+  color: var(--ps-danger);
+  border-color: color-mix(in srgb, var(--ps-danger) 28%, white);
+}
+
+.ps-badge--neutral {
+  background: #EEF2F7;
+  color: #334155;
+  border-color: #D8E0EA;
+}
+
+/* ---- Carte générique (prédiction, value bet, etc.) ---- */
+.ps-card {
+  background: var(--ps-card-bg);
+  border: 1px solid var(--ps-border);
+  border-radius: var(--ps-radius);
+  box-shadow: var(--ps-shadow-soft);
+  padding: 1.1rem 1.2rem;
+  margin: 0.6rem 0 1rem 0;
+}
+
+.ps-card__title {
+  margin: 0 0 0.55rem 0;
+  font-family: var(--ps-font-display);
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--ps-primary);
+}
+
+.ps-card__subtitle {
+  margin: 0 0 0.85rem 0;
+  color: var(--ps-muted);
+  font-size: 0.95rem;
+}
+
+/* ---- Streamlit : boutons ---- */
+.stButton > button {
+  border-radius: 999px !important;
+  border: 1px solid color-mix(in srgb, var(--ps-primary) 35%, white) !important;
+  background: var(--ps-primary) !important;
+  color: var(--ps-on-primary) !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.01em !important;
+  padding: 0.45rem 1.15rem !important;
+  box-shadow: var(--ps-shadow-soft) !important;
+  transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease !important;
+}
+
+.stButton > button:hover {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+  box-shadow: var(--ps-shadow) !important;
+}
+
+.stButton > button:focus {
+  outline: 2px solid var(--ps-secondary) !important;
+  outline-offset: 2px !important;
+}
+
+/* ---- Expanders ---- */
+[data-testid="stExpander"] {
+  background: var(--ps-card-bg) !important;
+  border: 1px solid var(--ps-border) !important;
+  border-radius: var(--ps-radius) !important;
+  box-shadow: var(--ps-shadow-soft) !important;
+  overflow: hidden;
+}
+
+[data-testid="stExpander"] details summary {
+  font-weight: 650 !important;
+  color: var(--ps-primary) !important;
+}
+
+[data-testid="stExpander"] details summary p,
+[data-testid="stExpander"] details summary span {
+  color: var(--ps-primary) !important;
+  font-weight: 650 !important;
+}
+
+[data-testid="stExpander"] details {
+  border-left: 4px solid var(--ps-secondary) !important;
+}
+
+/* ---- Tabs ---- */
+button[data-baseweb="tab"] {
+  font-weight: 600 !important;
+  color: var(--ps-muted) !important;
+}
+
+button[data-baseweb="tab"][aria-selected="true"] {
+  color: var(--ps-primary) !important;
+}
+
+[data-baseweb="tab-highlight"] {
+  background-color: var(--ps-secondary) !important;
+}
+
+/* ---- Metrics ---- */
+[data-testid="stMetric"] {
+  background: var(--ps-card-bg);
+  border: 1px solid var(--ps-border);
+  border-radius: var(--ps-radius-sm);
+  padding: 0.75rem 0.9rem;
+  box-shadow: var(--ps-shadow-soft);
+}
+
+[data-testid="stMetricLabel"] {
+  color: var(--ps-muted) !important;
+}
+
+[data-testid="stMetricValue"] {
+  color: var(--ps-primary) !important;
+  font-weight: 700 !important;
+}
+
+/* ---- Dataframes / tableaux ---- */
+[data-testid="stDataFrame"],
+[data-testid="stDataFrame"] > div,
+div[data-testid="stDataFrameResizable"] {
+  border: 1px solid var(--ps-border) !important;
+  border-radius: var(--ps-radius) !important;
+  overflow: hidden !important;
+  box-shadow: var(--ps-shadow-soft);
+  background: var(--ps-card-bg) !important;
+}
+
+[data-testid="stDataFrame"] thead tr th,
+[data-testid="stDataFrame"] th {
+  background: var(--ps-primary) !important;
+  color: var(--ps-on-primary) !important;
+  font-weight: 650 !important;
+  letter-spacing: 0.02em !important;
+  border: none !important;
+  padding-top: 0.7rem !important;
+  padding-bottom: 0.7rem !important;
+}
+
+[data-testid="stDataFrame"] tbody tr td,
+[data-testid="stDataFrame"] td {
+  border-bottom: 1px solid color-mix(in srgb, var(--ps-border) 80%, white) !important;
+  border-right: none !important;
+  padding-top: 0.72rem !important;
+  padding-bottom: 0.72rem !important;
+  background: transparent !important;
+}
+
+[data-testid="stDataFrame"] tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--ps-chip-bg) 70%, white) !important;
+}
+
+/* Glide Data Grid (Streamlit moderne) */
+[data-testid="stDataFrame"] [role="columnheader"] {
+  background: var(--ps-primary) !important;
+  color: var(--ps-on-primary) !important;
+  font-weight: 650 !important;
+}
+
+[data-testid="stDataFrame"] [role="gridcell"] {
+  border-image: none !important;
+}
+
+/* ---- Sidebar ---- */
+[data-testid="stSidebar"] {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--ps-primary) 8%, white) 0%, #ffffff 40%) !important;
+  border-right: 1px solid var(--ps-border);
+}
+
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+  color: var(--ps-primary) !important;
+}
+
+/* ---- Alertes / messages plus soignés ---- */
+[data-testid="stAlert"] {
+  border-radius: var(--ps-radius-sm) !important;
+  border: 1px solid var(--ps-border) !important;
+  box-shadow: var(--ps-shadow-soft);
+}
+
+/* ---- Progress bar ---- */
+.stProgress > div > div > div > div {
+  background-color: var(--ps-secondary) !important;
+}
+
+/* ---- Pied de page ---- */
+.ps-footer {
+  text-align: center;
+  color: var(--ps-muted);
+  font-size: 0.88rem;
+  padding: 1.1rem 0 0.4rem;
+}
+
+.ps-footer strong {
+  color: var(--ps-primary);
+}
