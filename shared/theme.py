@@ -215,7 +215,7 @@ def _badge_from_result_icon(icon: Any) -> str:
 
 
 def render_match_card_html(row: Mapping[str, Any]) -> str:
-    """HTML d'une carte match (une ligne du DataFrame résumé)."""
+    """HTML d'une carte match (conservé pour compatibilité / debug)."""
     match = _escape(row.get("Match", "Match"))
     statut = _escape(row.get("Statut", "—"))
     score = _escape(row.get("Score", "—"))
@@ -253,23 +253,70 @@ def render_match_card_html(row: Mapping[str, Any]) -> str:
     """
 
 
+def _afficher_carte_match_native(row: Mapping[str, Any]) -> None:
+    """Carte match via composants Streamlit natifs (fiable, pas de sanitization HTML)."""
+    with st.container(border=True):
+        col_titre, col_badge = st.columns([3.2, 1.2])
+        with col_titre:
+            st.markdown(f"**{row.get('Match', 'Match')}**")
+        with col_badge:
+            st.markdown(
+                badge_html(str(row.get("Statut", "—")), "status"),
+                unsafe_allow_html=True,
+            )
+
+        score = row.get("Score", "—")
+        st.markdown(
+            f'<p class="ps-match-card__score">{_escape(score)}</p>',
+            unsafe_allow_html=True,
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.caption("Total Runs")
+            st.write(str(row.get("Total Runs", "—")))
+        with c2:
+            st.caption("Home Runs")
+            st.write(str(row.get("Home Runs", "—")))
+
+        st.caption(f"Comparatif prédiction : {row.get('Comparatif Prédiction', '—')}")
+        st.markdown(
+            _badge_from_result_icon(row.get("Résultat vs Algo", "⏳")),
+            unsafe_allow_html=True,
+        )
+
+
 def afficher_cartes_matchs(df, *, show_table_fallback: bool = True, column_config=None) -> None:
     """
-    Affiche chaque match du DataFrame résumé sous forme de carte.
-    Conserve optionnellement une vue tableau dans un expander (tri / export).
+    Affiche le tableau en direct (toujours visible) + des cartes match natives.
+    Le tableau n'est plus masqué dans un expander : c'est la vue principale live.
     """
     if df is None or getattr(df, "empty", True):
         return
 
-    cards = "\n".join(render_match_card_html(row) for _, row in df.iterrows())
-    st.markdown(f'<div class="ps-match-grid">{cards}</div>', unsafe_allow_html=True)
-
+    # --- Tableau en direct (vue principale, toujours visible) ---
     if show_table_fallback:
-        with st.expander("📋 Vue tableau compacte", expanded=False):
-            kwargs = {"hide_index": True, "use_container_width": True}
-            if column_config is not None:
-                kwargs["column_config"] = column_config
-            st.dataframe(df, **kwargs)
+        st.markdown(
+            '<p class="ps-section-sub" style="margin:0.2rem 0 0.6rem 0;">'
+            "Tableau en direct — scores, statuts et comparatif algo</p>",
+            unsafe_allow_html=True,
+        )
+        kwargs = {"hide_index": True, "use_container_width": True}
+        if column_config is not None:
+            kwargs["column_config"] = column_config
+        st.dataframe(df, **kwargs)
+
+    # --- Cartes natives (complément visuel, sans HTML fragile) ---
+    with st.expander("🃏 Vue cartes par match", expanded=False):
+        rows = list(df.iterrows())
+        for i in range(0, len(rows), 2):
+            cols = st.columns(2)
+            for j, col in enumerate(cols):
+                idx = i + j
+                if idx >= len(rows):
+                    break
+                with col:
+                    _afficher_carte_match_native(rows[idx][1])
 
 
 def render_prediction_match_banner(title: str, subtitle: str = "") -> None:

@@ -371,15 +371,25 @@ button[data-baseweb="tab"][aria-selected="true"] {
   font-weight: 700 !important;
 }
 
-/* ---- Dataframes / tableaux ---- */
+/* ---- Dataframes / tableaux (dont tableau en direct) ---- */
 [data-testid="stDataFrame"],
 [data-testid="stDataFrame"] > div,
 div[data-testid="stDataFrameResizable"] {
   border: 1px solid var(--ps-border) !important;
   border-radius: var(--ps-radius) !important;
   overflow: hidden !important;
-  box-shadow: var(--ps-shadow-soft);
+  box-shadow: var(--ps-shadow);
   background: var(--ps-card-bg) !important;
+  margin: 0.25rem 0 1rem 0 !important;
+}
+
+/* Bandeau coloré au-dessus du tableau (les headers Glide sont en canvas) */
+[data-testid="stDataFrame"] {
+  position: relative;
+  padding-top: 4px !important;
+  background:
+    linear-gradient(90deg, var(--ps-primary) 0%, var(--ps-secondary) 100%) top / 100% 4px no-repeat,
+    var(--ps-card-bg) !important;
 }
 
 [data-testid="stDataFrame"] thead tr th,
@@ -389,21 +399,30 @@ div[data-testid="stDataFrameResizable"] {
   font-weight: 650 !important;
   letter-spacing: 0.02em !important;
   border: none !important;
-  padding-top: 0.7rem !important;
-  padding-bottom: 0.7rem !important;
+  padding-top: 0.75rem !important;
+  padding-bottom: 0.75rem !important;
 }
 
 [data-testid="stDataFrame"] tbody tr td,
 [data-testid="stDataFrame"] td {
   border-bottom: 1px solid color-mix(in srgb, var(--ps-border) 80%, white) !important;
   border-right: none !important;
-  padding-top: 0.72rem !important;
-  padding-bottom: 0.72rem !important;
+  padding-top: 0.78rem !important;
+  padding-bottom: 0.78rem !important;
   background: transparent !important;
 }
 
 [data-testid="stDataFrame"] tbody tr:nth-child(even) td {
   background: color-mix(in srgb, var(--ps-chip-bg) 70%, white) !important;
+}
+
+/* Conteneur bordé Streamlit (cartes natives) */
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background: var(--ps-card-bg) !important;
+  border: 1px solid var(--ps-border) !important;
+  border-radius: var(--ps-radius) !important;
+  box-shadow: var(--ps-shadow-soft) !important;
+  border-left: 4px solid var(--ps-secondary) !important;
 }
 
 /* Glide Data Grid (Streamlit moderne) */
