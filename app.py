@@ -2875,6 +2875,44 @@ def _bilan_over_under(total_runs_predit, total_runs_reel: int, ligne: float):
     ), icone
 
 
+def formater_recommandation_totaux_over_under(total_projete, ligne):
+    """
+    Affichage UNIQUEMENT (aucune modification du moteur de prédiction) :
+    compare le total de runs DÉJÀ projeté par l'algo (`prediction_runs['total_match']`,
+    soit Runs équipe + proxy adverse) à la ligne Over/Under de référence
+    (`obtenir_ligne_over_under_saison`, même cut-off que le bilan de la veille).
+
+    - écart > 1 run au-dessus de la ligne → Over
+    - écart > 1 run en dessous de la ligne → Under
+    - |écart| ≤ 1 → No Bet (marge trop faible)
+    """
+    if total_projete is None or ligne is None:
+        return None
+    try:
+        total = float(total_projete)
+        cut = float(ligne)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(total) or pd.isna(cut):
+        return None
+
+    ecart = total - cut
+    if abs(ecart) <= 1:
+        return (
+            f"⚠️ **Recommandation Totaux : NO BET sur les runs** "
+            f"(Projection : {total:.1f} | Ligne : {cut:.1f} - marge trop faible)."
+        )
+    if ecart > 1:
+        return (
+            f"📊 **Recommandation Totaux : Jouer l'OVER** "
+            f"(Projection : {total:.1f} | Ligne : {cut:.1f})."
+        )
+    return (
+        f"📊 **Recommandation Totaux : Jouer l'UNDER** "
+        f"(Projection : {total:.1f} | Ligne : {cut:.1f})."
+    )
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def construire_bilan_veille(annee: int, date_hier_str: str, cache_bust: int = 0):
     """
@@ -3636,10 +3674,20 @@ with onglets[3]:
                 joueurs_a_surveiller,
                 ligue=detecter_ligue_match(match_du_jour),
             )
-            if conseils_paris:
+            # Affichage Over/Under explicite : comparaison finale UNIQUEMENT
+            # (projection déjà calculée vs ligne du bilan de la veille).
+            # Ne touche ni à predire_runs_match ni à generer_recommandation_pari.
+            reco_totaux = formater_recommandation_totaux_over_under(
+                prediction_runs.get('total_match') if prediction_runs else None,
+                obtenir_ligne_over_under_saison(annee),
+            )
+            lignes_reco = list(conseils_paris or [])
+            if reco_totaux:
+                lignes_reco.append(reco_totaux)
+            if lignes_reco:
                 st.info(
                     "**💡 Recommandation de Pari Optimisée**\n\n"
-                    + "\n\n".join(conseils_paris)
+                    + "\n\n".join(lignes_reco)
                 )
 
             st.caption(
