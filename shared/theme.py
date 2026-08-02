@@ -271,13 +271,24 @@ def _afficher_carte_match_native(row: Mapping[str, Any]) -> None:
             unsafe_allow_html=True,
         )
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.caption("Total Runs")
-            st.write(str(row.get("Total Runs", "—")))
-        with c2:
-            st.caption("Home Runs")
-            st.write(str(row.get("Home Runs", "—")))
+        # Runs (scoreurs) + Home Runs — même niveau de détail que le tableau
+        runs_val = str(row.get("Total Runs", row.get("Runs", "—")) or "—")
+        hr_val = str(row.get("Home Runs", "—") or "—")
+        st.markdown(
+            f"""
+            <div class="ps-match-card__meta">
+              <div class="ps-match-card__meta-item" style="grid-column: 1 / -1;">
+                <span class="ps-match-card__meta-label">Runs</span>
+                <span class="ps-match-card__meta-value">{_escape(runs_val)}</span>
+              </div>
+              <div class="ps-match-card__meta-item" style="grid-column: 1 / -1;">
+                <span class="ps-match-card__meta-label">Home Runs</span>
+                <span class="ps-match-card__meta-value">{_escape(hr_val)}</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         st.caption(f"Comparatif prédiction : {row.get('Comparatif Prédiction', '—')}")
         st.markdown(

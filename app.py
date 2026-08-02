@@ -2759,11 +2759,19 @@ def construire_resume_matchs_du_jour(annee: int, cache_bust: int = 0):
             # Colonne texte (pas numérique) volontairement : elle doit pouvoir afficher
             # "—" pour les matchs pas encore commencés sans faire planter la
             # sérialisation Arrow du tableau (colonne à types mixtes int/str sinon).
-            total_runs = str(home_score + away_score)
             box_url = g.get('box_url')
             date_str = g.get('Date')
-            hr_home = obtenir_hr_joueurs_match_jour(box_url, True, date_str, code_home, code_away, cache_bust)
-            hr_away = obtenir_hr_joueurs_match_jour(box_url, False, date_str, code_home, code_away, cache_bust)
+            # Runs + HR détaillés (même format que le bilan de la veille) pour le
+            # tableau en direct ET la vue cartes.
+            runs_home, hr_home = obtenir_scoreurs_runs_et_hr_match_jour(
+                box_url, True, date_str, code_home, code_away, cache_bust
+            )
+            runs_away, hr_away = obtenir_scoreurs_runs_et_hr_match_jour(
+                box_url, False, date_str, code_home, code_away, cache_bust
+            )
+            total_runs = _formater_cellule_total_runs(
+                home_score + away_score, away_abbr, runs_away, home_abbr, runs_home
+            )
             hr_str = _formater_cellule_hr(away_abbr, hr_away, home_abbr, hr_home)
         else:
             score_str = "—"
@@ -3134,7 +3142,7 @@ def afficher_onglet_resume(annee: int):
         "Match": st.column_config.TextColumn("Match", width="medium"),
         "Statut": st.column_config.TextColumn("Statut", width="small"),
         "Score": st.column_config.TextColumn("Score", width="small"),
-        "Total Runs": st.column_config.TextColumn("Total Runs", width="small"),
+        "Total Runs": st.column_config.TextColumn("Total Runs", width="large"),
         "Home Runs": st.column_config.TextColumn("Home Runs", width="large"),
         "Comparatif Prédiction": st.column_config.TextColumn("Comparatif Prédiction", width="medium"),
         "Résultat vs Algo": st.column_config.TextColumn("Résultat vs Algo", width="small"),
