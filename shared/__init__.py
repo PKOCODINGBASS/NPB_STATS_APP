@@ -1,29 +1,8 @@
-"""Design system partagé du monorepo PARIS SPORTIFS (MLB / NPB / KBO)."""
+"""Design system partagé du monorepo PARIS SPORTIFS (MLB / NPB / KBO).
 
-from .theme import (
-    LEAGUE_THEMES,
-    apply_theme,
-    afficher_cartes_matchs,
-    afficher_badge_value_bet,
-    afficher_tableau_recap_hot_pronostics,
-    badge_html,
-    render_page_header,
-    render_section_title,
-    render_match_card_html,
-    render_prediction_match_banner,
-    render_footer,
-)
-
-__all__ = [
-    "LEAGUE_THEMES",
-    "apply_theme",
-    "afficher_cartes_matchs",
-    "afficher_badge_value_bet",
-    "afficher_tableau_recap_hot_pronostics",
-    "badge_html",
-    "render_page_header",
-    "render_section_title",
-    "render_match_card_html",
-    "render_prediction_match_banner",
-    "render_footer",
-]
+Volontairement minimal : ne pas réimporter theme ici.
+Sur Streamlit Cloud, un `__init__.py` qui fait `from .theme import ...`
+peut masquer l'erreur réelle ou entrer en conflit avec d'autres paquets
+nommés `shared`. Les apps importent `shared.theme` (ou chargent theme.py
+par chemin absolu).
+"""

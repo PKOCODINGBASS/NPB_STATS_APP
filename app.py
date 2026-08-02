@@ -31,24 +31,36 @@ from bs4 import BeautifulSoup   # Parsing HTML des pages npb.jp
 from datetime import datetime, timedelta  # Gestion des dates (timedelta : calcul de "hier")
 from zoneinfo import ZoneInfo   # Gestion des fuseaux horaires (JST <-> heure française)
 
-# Design system partagé (monorepo PARIS SPORTIFS) — cherche shared/ local puis parent
-import sys
+# Design system partagé — chargement par chemin absolu (évite ImportError 'shared' sur Cloud)
+import importlib.util as _importlib_util
+import sys as _sys
 from pathlib import Path as _Path
-for _base in (_Path(__file__).resolve().parent, _Path(__file__).resolve().parent.parent):
-    if (_base / "shared" / "theme.py").is_file():
-        if str(_base) not in sys.path:
-            sys.path.insert(0, str(_base))
-        break
-from shared.theme import (  # noqa: E402
-    apply_theme,
-    render_page_header,
-    render_section_title,
-    afficher_cartes_matchs,
-    afficher_badge_value_bet,
-    afficher_tableau_recap_hot_pronostics,
-    render_footer,
-    render_prediction_match_banner,
+
+_THEME_PATH = next(
+    (
+        p
+        for p in (
+            _Path(__file__).resolve().parent / "shared" / "theme.py",
+            _Path(__file__).resolve().parent.parent / "shared" / "theme.py",
+        )
+        if p.is_file()
+    ),
+    None,
 )
+if _THEME_PATH is None:
+    raise ImportError("shared/theme.py introuvable à côté de l'app NPB.")
+_spec = _importlib_util.spec_from_file_location("ps_shared_theme", _THEME_PATH)
+_ps_theme = _importlib_util.module_from_spec(_spec)
+_sys.modules["ps_shared_theme"] = _ps_theme
+_spec.loader.exec_module(_ps_theme)
+apply_theme = _ps_theme.apply_theme
+render_page_header = _ps_theme.render_page_header
+render_section_title = _ps_theme.render_section_title
+afficher_cartes_matchs = _ps_theme.afficher_cartes_matchs
+afficher_badge_value_bet = _ps_theme.afficher_badge_value_bet
+afficher_tableau_recap_hot_pronostics = _ps_theme.afficher_tableau_recap_hot_pronostics
+render_footer = _ps_theme.render_footer
+render_prediction_match_banner = _ps_theme.render_prediction_match_banner
 
 # ============================================================
 # Fuseaux horaires : les matchs NPB sont annoncés et joués en heure du Japon
