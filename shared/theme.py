@@ -382,6 +382,9 @@ def render_footer(league_label: str, date_str: str) -> None:
 def afficher_tableau_recap_hot_pronostics(rows: list) -> None:
     """
     Affiche le tableau de bord Hot Pronostics (3 colonnes).
+    Rendu 100% Streamlit natif (pas de <table> HTML) : Streamlit sanitise les
+    tableaux HTML et les affichait comme du code brut.
+
     `rows` = liste de dicts déjà agrégés (aucune requête ici) :
       confrontation, heure, favori, favori_pct, value_kind, value_label,
       ou_kind ('OVER'|'UNDER'|'NO_BET'|None), ou_resume
@@ -390,73 +393,53 @@ def afficher_tableau_recap_hot_pronostics(rows: list) -> None:
         st.info("Aucun match à afficher dans le tableau de bord du jour.")
         return
 
-    body_rows = []
+    value_emoji = {
+        "value": "🟢",
+        "medium": "🟠",
+        "avoid": "🔴",
+        "none": "⚪",
+    }
+    ou_labels = {
+        "OVER": "🟢 OVER",
+        "UNDER": "🟢 UNDER",
+        "NO_BET": "⚠️ NO BET",
+    }
+
+    # En-tête des colonnes
+    h1, h2, h3 = st.columns([1.1, 1.4, 1.4])
+    with h1:
+        st.markdown("**Confrontation**")
+    with h2:
+        st.markdown("**Recommandation Vainqueur & Value**")
+    with h3:
+        st.markdown("**Recommandation Totaux (O/U)**")
+
     for row in rows:
-        heure = _escape(row.get("heure") or "—")
-        confrontation = _escape(row.get("confrontation") or "—")
-        favori = row.get("favori")
-        pct = row.get("favori_pct")
-        if favori:
-            favori_txt = _escape(favori)
-            if pct is not None:
-                try:
-                    favori_txt += f" ({float(pct):.0f}%)"
-                except (TypeError, ValueError):
-                    pass
-        else:
-            favori_txt = "Non disponible"
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([1.1, 1.4, 1.4])
 
-        value_kind = row.get("value_kind") or "none"
-        value_label = row.get("value_label") or "Pas de value"
-        value_badge = badge_html(value_label, value_kind)
+            with c1:
+                st.markdown(f"**{row.get('confrontation') or '—'}**")
+                st.caption(str(row.get("heure") or "—"))
 
-        ou_kind = row.get("ou_kind")
-        ou_resume = _escape(row.get("ou_resume") or "")
-        if ou_kind in ("OVER", "UNDER"):
-            ou_badge = badge_html(ou_kind, "ou-play")
-        elif ou_kind == "NO_BET":
-            ou_badge = badge_html("⚠️ NO BET", "ou-nobet")
-        else:
-            ou_badge = badge_html("N/A", "ou-nobet")
+            with c2:
+                favori = row.get("favori")
+                pct = row.get("favori_pct")
+                if favori:
+                    try:
+                        favori_txt = f"{favori} ({float(pct):.0f}%)" if pct is not None else str(favori)
+                    except (TypeError, ValueError):
+                        favori_txt = str(favori)
+                else:
+                    favori_txt = "Non disponible"
+                st.markdown(f"**{favori_txt}**")
+                emoji = value_emoji.get(row.get("value_kind") or "none", "⚪")
+                st.caption(f"{emoji} {row.get('value_label') or 'Pas de value'}")
 
-        body_rows.append(
-            f"""
-            <tr>
-              <td>
-                <p class="ps-recap-match">{confrontation}</p>
-                <p class="ps-recap-heure">{heure}</p>
-              </td>
-              <td>
-                <p class="ps-recap-favori">{favori_txt}</p>
-                {value_badge}
-              </td>
-              <td>
-                {ou_badge}
-                <span class="ps-recap-ou-detail">{ou_resume}</span>
-              </td>
-            </tr>
-            """
-        )
-
-    st.markdown(
-        f"""
-        <div class="ps-recap-wrap">
-          <table class="ps-recap-table">
-            <thead>
-              <tr>
-                <th style="width:28%;">Confrontation</th>
-                <th style="width:36%;">Recommandation Vainqueur &amp; Value</th>
-                <th style="width:36%;">Recommandation Totaux (O/U)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {''.join(body_rows)}
-            </tbody>
-          </table>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+            with c3:
+                ou_kind = row.get("ou_kind")
+                st.markdown(f"**{ou_labels.get(ou_kind, '⚪ N/A')}**")
+                st.caption(str(row.get("ou_resume") or "Projection indisponible"))
 
 
 def ensure_shared_on_path(app_file: str) -> None:
