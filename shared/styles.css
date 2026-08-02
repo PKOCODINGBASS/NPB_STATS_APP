@@ -372,24 +372,41 @@ button[data-baseweb="tab"][aria-selected="true"] {
 }
 
 /* ---- Dataframes / tableaux (dont tableau en direct) ---- */
+/* Important : PAS de overflow:hidden ici — ça enterrait la barre d'outils
+   Streamlit (fullscreen / download) qui s'affiche au survol à droite. */
 [data-testid="stDataFrame"],
-[data-testid="stDataFrame"] > div,
 div[data-testid="stDataFrameResizable"] {
   border: 1px solid var(--ps-border) !important;
   border-radius: var(--ps-radius) !important;
-  overflow: hidden !important;
+  overflow: visible !important;
   box-shadow: var(--ps-shadow);
   background: var(--ps-card-bg) !important;
-  margin: 0.25rem 0 1rem 0 !important;
+  margin: 0.25rem 0 1.25rem 0 !important;
 }
 
 /* Bandeau coloré au-dessus du tableau (les headers Glide sont en canvas) */
 [data-testid="stDataFrame"] {
   position: relative;
+  z-index: 1;
   padding-top: 4px !important;
   background:
     linear-gradient(90deg, var(--ps-primary) 0%, var(--ps-secondary) 100%) top / 100% 4px no-repeat,
     var(--ps-card-bg) !important;
+}
+
+/* Barre d'outils du tableau (icônes à droite au survol) au-dessus du canvas */
+[data-testid="stElementToolbar"],
+[data-testid="stDataFrameToolbar"],
+[data-testid="stDataFrame"] [data-testid="stElementToolbar"] {
+  z-index: 50 !important;
+  overflow: visible !important;
+  pointer-events: auto !important;
+}
+
+/* Arrondi uniquement sur la grille interne, sans clipper la toolbar */
+[data-testid="stDataFrame"] [data-testid="stDataFrameGlideDataEditor"],
+[data-testid="stDataFrame"] canvas {
+  border-radius: calc(var(--ps-radius) - 2px);
 }
 
 [data-testid="stDataFrame"] thead tr th,
