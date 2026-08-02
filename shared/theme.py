@@ -187,10 +187,14 @@ def badge_html(label: str, kind: str = "status") -> str:
         "loss": ("loss", label or "Loss"),
         "pending": ("pending", label or "Pending"),
         "value": ("value", label or "Value Bet"),
+        "medium": ("medium", label or "Value moyenne"),
         "avoid": ("avoid", label or "Éviter"),
         "neutral": ("neutral", label or "Juste"),
+        "none": ("ou-nobet", label or "Pas de value"),
         "status": ("status", label or "Statut"),
         "evitez": ("avoid", label or "Éviter"),
+        "ou-play": ("ou-play", label or "O/U"),
+        "ou-nobet": ("ou-nobet", label or "NO BET"),
     }
     kind_key = (kind or "status").strip()
     if kind_key in mapping:
@@ -371,6 +375,86 @@ def render_footer(league_label: str, date_str: str) -> None:
     st.markdown(
         f'<div class="ps-footer"><strong>{_escape(league_label)}</strong> Analytics · '
         f'Données mises à jour : {_escape(date_str)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def afficher_tableau_recap_hot_pronostics(rows: list) -> None:
+    """
+    Affiche le tableau de bord Hot Pronostics (3 colonnes).
+    `rows` = liste de dicts déjà agrégés (aucune requête ici) :
+      confrontation, heure, favori, favori_pct, value_kind, value_label,
+      ou_kind ('OVER'|'UNDER'|'NO_BET'|None), ou_resume
+    """
+    if not rows:
+        st.info("Aucun match à afficher dans le tableau de bord du jour.")
+        return
+
+    body_rows = []
+    for row in rows:
+        heure = _escape(row.get("heure") or "—")
+        confrontation = _escape(row.get("confrontation") or "—")
+        favori = row.get("favori")
+        pct = row.get("favori_pct")
+        if favori:
+            favori_txt = _escape(favori)
+            if pct is not None:
+                try:
+                    favori_txt += f" ({float(pct):.0f}%)"
+                except (TypeError, ValueError):
+                    pass
+        else:
+            favori_txt = "Non disponible"
+
+        value_kind = row.get("value_kind") or "none"
+        value_label = row.get("value_label") or "Pas de value"
+        value_badge = badge_html(value_label, value_kind)
+
+        ou_kind = row.get("ou_kind")
+        ou_resume = _escape(row.get("ou_resume") or "")
+        if ou_kind in ("OVER", "UNDER"):
+            ou_badge = badge_html(ou_kind, "ou-play")
+        elif ou_kind == "NO_BET":
+            ou_badge = badge_html("⚠️ NO BET", "ou-nobet")
+        else:
+            ou_badge = badge_html("N/A", "ou-nobet")
+
+        body_rows.append(
+            f"""
+            <tr>
+              <td>
+                <p class="ps-recap-match">{confrontation}</p>
+                <p class="ps-recap-heure">{heure}</p>
+              </td>
+              <td>
+                <p class="ps-recap-favori">{favori_txt}</p>
+                {value_badge}
+              </td>
+              <td>
+                {ou_badge}
+                <span class="ps-recap-ou-detail">{ou_resume}</span>
+              </td>
+            </tr>
+            """
+        )
+
+    st.markdown(
+        f"""
+        <div class="ps-recap-wrap">
+          <table class="ps-recap-table">
+            <thead>
+              <tr>
+                <th style="width:28%;">Confrontation</th>
+                <th style="width:36%;">Recommandation Vainqueur &amp; Value</th>
+                <th style="width:36%;">Recommandation Totaux (O/U)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {''.join(body_rows)}
+            </tbody>
+          </table>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 

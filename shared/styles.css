@@ -267,6 +267,88 @@ html, body, [data-testid="stAppViewContainer"], .stApp {
   border-color: #D8E0EA;
 }
 
+.ps-badge--medium {
+  background: color-mix(in srgb, #D97706 16%, white);
+  color: #B45309;
+  border-color: color-mix(in srgb, #D97706 30%, white);
+}
+
+.ps-badge--ou-play {
+  background: color-mix(in srgb, var(--ps-success) 16%, white);
+  color: var(--ps-success);
+  border-color: color-mix(in srgb, var(--ps-success) 28%, white);
+}
+
+.ps-badge--ou-nobet {
+  background: #F3F4F6;
+  color: #6B7280;
+  border-color: #E5E7EB;
+}
+
+/* ---- Tableau de bord Hot Pronostics ---- */
+.ps-recap-wrap {
+  margin: 0.2rem 0 1.15rem 0;
+  border: 1px solid var(--ps-border);
+  border-radius: var(--ps-radius);
+  box-shadow: var(--ps-shadow-soft);
+  overflow: hidden;
+  background: var(--ps-card-bg);
+}
+
+.ps-recap-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.ps-recap-table thead th {
+  background: var(--ps-primary);
+  color: var(--ps-on-primary);
+  text-align: left;
+  padding: 0.75rem 0.9rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.ps-recap-table tbody td {
+  padding: 0.85rem 0.9rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--ps-border) 85%, white);
+  vertical-align: top;
+  color: var(--ps-text);
+}
+
+.ps-recap-table tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--ps-chip-bg) 65%, white);
+}
+
+.ps-recap-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.ps-recap-match {
+  font-weight: 650;
+  color: var(--ps-primary);
+  margin: 0 0 0.25rem 0;
+}
+
+.ps-recap-heure {
+  color: var(--ps-muted);
+  font-size: 0.82rem;
+  margin: 0;
+}
+
+.ps-recap-favori {
+  font-weight: 600;
+  margin: 0 0 0.4rem 0;
+}
+
+.ps-recap-ou-detail {
+  display: block;
+  margin-top: 0.35rem;
+  color: var(--ps-muted);
+  font-size: 0.82rem;
+}
+
 /* ---- Carte générique (prédiction, value bet, etc.) ---- */
 .ps-card {
   background: var(--ps-card-bg);

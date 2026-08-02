@@ -45,6 +45,7 @@ from shared.theme import (  # noqa: E402
     render_section_title,
     afficher_cartes_matchs,
     afficher_badge_value_bet,
+    afficher_tableau_recap_hot_pronostics,
     render_footer,
     render_prediction_match_banner,
 )
@@ -2875,16 +2876,11 @@ def _bilan_over_under(total_runs_predit, total_runs_reel: int, ligne: float):
     ), icone
 
 
-def formater_recommandation_totaux_over_under(total_projete, ligne):
+def classer_recommandation_totaux_over_under(total_projete, ligne):
     """
-    Affichage UNIQUEMENT (aucune modification du moteur de prédiction) :
-    compare le total de runs DÉJÀ projeté par l'algo (`prediction_runs['total_match']`,
-    soit Runs équipe + proxy adverse) à la ligne Over/Under de référence
-    (`obtenir_ligne_over_under_saison`, même cut-off que le bilan de la veille).
-
-    - écart > 1 run au-dessus de la ligne → Over
-    - écart > 1 run en dessous de la ligne → Under
-    - |écart| ≤ 1 → No Bet (marge trop faible)
+    Comparaison mathématique finale UNIQUEMENT (aucune modification du moteur) :
+    projection déjà calculée vs ligne Over/Under de référence.
+    Retourne {'code': 'OVER'|'UNDER'|'NO_BET'|None, 'resume': str} ou None.
     """
     if total_projete is None or ligne is None:
         return None
@@ -2897,20 +2893,121 @@ def formater_recommandation_totaux_over_under(total_projete, ligne):
         return None
 
     ecart = total - cut
+    resume = f"Proj: {total:.1f} | Ligne: {cut:.1f}"
     if abs(ecart) <= 1:
+        return {'code': 'NO_BET', 'resume': f"{resume} - marge trop faible"}
+    if ecart > 1:
+        return {'code': 'OVER', 'resume': resume}
+    return {'code': 'UNDER', 'resume': resume}
+
+
+def formater_recommandation_totaux_over_under(total_projete, ligne):
+    """
+    Affichage UNIQUEMENT (aucune modification du moteur de prédiction) :
+    compare le total de runs DÉJÀ projeté par l'algo (`prediction_runs['total_match']`,
+    soit Runs équipe + proxy adverse) à la ligne Over/Under de référence
+    (`obtenir_ligne_over_under_saison`, même cut-off que le bilan de la veille).
+    """
+    if total_projete is None or ligne is None:
+        return None
+    try:
+        total = float(total_projete)
+        cut = float(ligne)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(total) or pd.isna(cut):
+        return None
+
+    classement = classer_recommandation_totaux_over_under(total, cut)
+    if not classement:
+        return None
+    if classement['code'] == 'NO_BET':
         return (
             f"⚠️ **Recommandation Totaux : NO BET sur les runs** "
             f"(Projection : {total:.1f} | Ligne : {cut:.1f} - marge trop faible)."
         )
-    if ecart > 1:
-        return (
-            f"📊 **Recommandation Totaux : Jouer l'OVER** "
-            f"(Projection : {total:.1f} | Ligne : {cut:.1f})."
-        )
     return (
-        f"📊 **Recommandation Totaux : Jouer l'UNDER** "
+        f"📊 **Recommandation Totaux : Jouer l'{classement['code']}** "
         f"(Projection : {total:.1f} | Ligne : {cut:.1f})."
     )
+
+
+def assembler_lignes_recap_hot_pronostics(matchs_jour: list, df_victoires, annee: int) -> list:
+    """
+    Agrège le tableau de bord Hot Pronostics à partir des données DÉJÀ calculées
+    (`construire_donnees_hot_pronostics`) + caches existants (ligne O/U, cotes, resumes).
+    Aucun recalcul de probabilités / runs : GET + comparaison d'affichage uniquement.
+    """
+    if not matchs_jour or df_victoires is None or getattr(df_victoires, 'empty', True):
+        return []
+
+    ligne_ou = obtenir_ligne_over_under_saison(annee)
+    codes = sorted({
+        (m.get('code_home') or '').lower() for m in matchs_jour if m.get('code_home')
+    } | {
+        (m.get('code_away') or '').lower() for m in matchs_jour if m.get('code_away')
+    })
+    resumes = {
+        code: obtenir_resume_10_derniers_matchs_equipe(annee, code.upper())
+        for code in codes
+    }
+    cle_odds = _lire_cle_odds_api()
+    cotes_du_jour = (
+        obtenir_cotes_moneyline_du_jour(ODDS_API_SPORT_KEY, cle_odds) if cle_odds else []
+    )
+
+    lignes = []
+    for idx, m in enumerate(matchs_jour):
+        if idx >= len(df_victoires):
+            break
+        v = df_victoires.iloc[idx]
+        home = m.get('home_name') or v.get('Équipe Domicile') or '?'
+        away = m.get('away_name') or v.get('Équipe Extérieur') or '?'
+        heure = m.get('heure_paris') or v.get('Heure (France)') or '—'
+        pct_home = v.get('Proba Domicile (%)')
+        pct_away = v.get('Proba Extérieur (%)')
+
+        favori, pct_fav = None, None
+        if pct_home is not None and pct_away is not None and not pd.isna(pct_home) and not pd.isna(pct_away):
+            if pct_home >= pct_away:
+                favori, pct_fav = home, float(pct_home)
+            else:
+                favori, pct_fav = away, float(pct_away)
+
+        value_kind, value_label = 'none', 'Pas de value'
+        if favori and cotes_du_jour:
+            cotes_match = trouver_cote_du_match(cotes_du_jour, home, away)
+            if cotes_match:
+                cote_fav = (
+                    cotes_match.get('cote_nous') if favori == home else cotes_match.get('cote_adverse')
+                )
+                niveau, _msg = evaluer_value_bet(
+                    pct_fav, cote_fav, favori, cotes_match.get('bookmaker') or 'Bookmaker'
+                )
+                if niveau == 'value':
+                    value_kind, value_label = 'value', 'Value forte'
+                elif niveau == 'juste':
+                    value_kind, value_label = 'medium', 'Value moyenne'
+                elif niveau == 'evitez':
+                    value_kind, value_label = 'avoid', 'Pas de value'
+
+        total_proj = _total_runs_predit(
+            resumes.get((m.get('code_home') or '').lower()),
+            resumes.get((m.get('code_away') or '').lower()),
+        )
+        classement_ou = classer_recommandation_totaux_over_under(total_proj, ligne_ou)
+
+        lignes.append({
+            'confrontation': f"{away} vs {home}",
+            'heure': f"⏰ {heure}" if heure and heure != '—' else "⏰ —",
+            'favori': favori,
+            'favori_pct': pct_fav,
+            'value_kind': value_kind,
+            'value_label': value_label,
+            'ou_kind': classement_ou['code'] if classement_ou else None,
+            'ou_resume': classement_ou['resume'] if classement_ou else 'Projection indisponible',
+        })
+    return lignes
 
 
 @st.cache_data(show_spinner=False, ttl=300)
@@ -3269,13 +3366,6 @@ with onglets[1]:
             "Hot Pronostics du jour",
             "Les meilleurs pronostics du jour, tous matchs confondus (heure du Japon)",
         )
-        st.caption(
-            "⚠️ Estimations statistiques automatiques calculées à partir des lanceurs partants "
-            "annoncés (annoncés la veille au Japon) et de la forme récente des joueurs (10 "
-            "derniers matchs). Ce ne sont pas des garanties de résultat : simples heuristiques, "
-            "à utiliser uniquement à titre informatif, avec discernement si vous vous en servez "
-            "pour parier."
-        )
 
         if annee != ANNEE_COURANTE:
             st.info(
@@ -3285,10 +3375,23 @@ with onglets[1]:
         else:
             with st.spinner("Analyse de tous les matchs du jour (lanceurs annoncés, forme récente des 10 derniers matchs)..."):
                 matchs_jour, df_top5_hr, df_top5_runs, df_victoires = construire_donnees_hot_pronostics(annee)
+                lignes_recap = assembler_lignes_recap_hot_pronostics(matchs_jour, df_victoires, annee)
 
             if not matchs_jour:
                 st.info("Aucun match n'est prévu aujourd'hui (heure du Japon).")
             else:
+                # --- Tableau de bord global : TOUT PREMIER élément de l'onglet ---
+                st.subheader("📋 Tableau de bord du jour")
+                afficher_tableau_recap_hot_pronostics(lignes_recap)
+
+                st.caption(
+                    "⚠️ Estimations statistiques automatiques calculées à partir des lanceurs partants "
+                    "annoncés (annoncés la veille au Japon) et de la forme récente des joueurs (10 "
+                    "derniers matchs). Ce ne sont pas des garanties de résultat : simples heuristiques, "
+                    "à utiliser uniquement à titre informatif, avec discernement si vous vous en servez "
+                    "pour parier."
+                )
+
                 nb_lanceurs_annonces = sum(
                     1 for m in matchs_jour if m['home_pitcher'] or m['away_pitcher']
                 )
