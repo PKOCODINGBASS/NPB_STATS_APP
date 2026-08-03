@@ -2337,6 +2337,23 @@ def obtenir_resume_10_derniers_matchs_equipe(annee: int, code_equipe: str):
     }
 
 
+def _classer_candidats_home_runs_npb(candidats: list) -> pd.DataFrame:
+    """Classe TOUS les candidats HR (même formule que le Top 5) — affichage uniquement."""
+    if not candidats:
+        return pd.DataFrame()
+    df = pd.DataFrame(candidats)
+    indice = (
+        _normaliser_colonne(df['HR (10 derniers matchs)']) * 0.60
+        + _normaliser_colonne(df['HR/9 lanceur adverse']) * 0.40
+    ) * 100
+    df['Indice HR (/100)'] = indice.round(1)
+    df = df.sort_values('Indice HR (/100)', ascending=False).reset_index(drop=True)
+    return df[[
+        'Joueur', 'Équipe', 'Adversaire', 'Lanceur adverse',
+        'HR (10 derniers matchs)', 'HR/9 lanceur adverse', 'Indice HR (/100)'
+    ]]
+
+
 def _calculer_top5_home_runs_npb(candidats: list) -> pd.DataFrame:
     """
     Construit le classement "Top 5 Home Runs probables" à partir de la liste de
@@ -2349,18 +2366,26 @@ def _calculer_top5_home_runs_npb(candidats: list) -> pd.DataFrame:
     (voir docstring de `construire_donnees_hot_pronostics` pour le détail des
     différences par rapport à la version MLB).
     """
+    df = _classer_candidats_home_runs_npb(candidats)
+    if df.empty:
+        return df
+    return df.head(5).reset_index(drop=True)
+
+
+def _classer_candidats_runs_npb(candidats: list) -> pd.DataFrame:
+    """Classe TOUS les candidats Run (même formule que le Top 5) — affichage uniquement."""
     if not candidats:
         return pd.DataFrame()
     df = pd.DataFrame(candidats)
     indice = (
-        _normaliser_colonne(df['HR (10 derniers matchs)']) * 0.60
-        + _normaliser_colonne(df['HR/9 lanceur adverse']) * 0.40
+        _normaliser_colonne(df['Runs (10 derniers matchs)']) * 0.60
+        + _normaliser_colonne(df['ERA lanceur adverse']) * 0.40
     ) * 100
-    df['Indice HR (/100)'] = indice.round(1)
-    df = df.sort_values('Indice HR (/100)', ascending=False).head(5).reset_index(drop=True)
+    df['Indice Run (/100)'] = indice.round(1)
+    df = df.sort_values('Indice Run (/100)', ascending=False).reset_index(drop=True)
     return df[[
         'Joueur', 'Équipe', 'Adversaire', 'Lanceur adverse',
-        'HR (10 derniers matchs)', 'HR/9 lanceur adverse', 'Indice HR (/100)'
+        'Runs (10 derniers matchs)', 'ERA lanceur adverse', 'Indice Run (/100)'
     ]]
 
 
@@ -2377,19 +2402,29 @@ def _calculer_top5_runs_npb(candidats: list) -> pd.DataFrame:
     utilisés côté MLB sont absents ici (voir docstring de
     `construire_donnees_hot_pronostics`).
     """
-    if not candidats:
-        return pd.DataFrame()
-    df = pd.DataFrame(candidats)
-    indice = (
-        _normaliser_colonne(df['Runs (10 derniers matchs)']) * 0.60
-        + _normaliser_colonne(df['ERA lanceur adverse']) * 0.40
-    ) * 100
-    df['Indice Run (/100)'] = indice.round(1)
-    df = df.sort_values('Indice Run (/100)', ascending=False).head(5).reset_index(drop=True)
-    return df[[
-        'Joueur', 'Équipe', 'Adversaire', 'Lanceur adverse',
-        'Runs (10 derniers matchs)', 'ERA lanceur adverse', 'Indice Run (/100)'
-    ]]
+    df = _classer_candidats_runs_npb(candidats)
+    if df.empty:
+        return df
+    return df.head(5).reset_index(drop=True)
+
+
+def _meilleure_reco_joueur_match(df_ranked, home: str, away: str, indice_col: str):
+    """Meilleur joueur déjà classé pour une confrontation — sans recalcul."""
+    if df_ranked is None or getattr(df_ranked, 'empty', True):
+        return None
+    mask = (
+        ((df_ranked['Équipe'] == home) & (df_ranked['Adversaire'] == away))
+        | ((df_ranked['Équipe'] == away) & (df_ranked['Adversaire'] == home))
+    )
+    sous = df_ranked.loc[mask]
+    if sous.empty:
+        return None
+    best = sous.iloc[0]
+    return {
+        'joueur': best.get('Joueur'),
+        'equipe': best.get('Équipe'),
+        'indice': best.get(indice_col),
+    }
 
 
 def _total_runs_predit(resume_home, resume_away):
@@ -2447,7 +2482,7 @@ def construire_donnees_hot_pronostics(annee: int):
     """
     df_jour, maintenant_jst = obtenir_calendrier_du_jour_jst()
     if df_jour.empty:
-        return [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     ids_lanceurs_annonces = _charger_ids_lanceurs_annonces()
 
@@ -2486,7 +2521,7 @@ def construire_donnees_hot_pronostics(annee: int):
         })
 
     if not matchs_du_jour:
-        return [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     # Résumé "10 derniers matchs" calculé UNE SEULE FOIS par équipe jouant aujourd'hui
     # (une équipe NPB ne joue qu'un seul match par jour, donc pas de risque de calcul
@@ -2564,8 +2599,10 @@ def construire_donnees_hot_pronostics(annee: int):
                     'ERA lanceur adverse': era_adverse,
                 })
 
-    df_top5_hr = _calculer_top5_home_runs_npb(candidats_hr)
-    df_top5_runs = _calculer_top5_runs_npb(candidats_runs)
+    df_hr_all = _classer_candidats_home_runs_npb(candidats_hr)
+    df_runs_all = _classer_candidats_runs_npb(candidats_runs)
+    df_top5_hr = df_hr_all.head(5).reset_index(drop=True) if not df_hr_all.empty else df_hr_all
+    df_top5_runs = df_runs_all.head(5).reset_index(drop=True) if not df_runs_all.empty else df_runs_all
     df_victoires = pd.DataFrame(lignes_victoire)
 
     # --- Archivage de l'instantané du jour (pour le "Bilan des Prédictions" de la
@@ -2591,7 +2628,7 @@ def construire_donnees_hot_pronostics(annee: int):
     ]
     _sauvegarder_predictions_du_jour(maintenant_jst.strftime('%Y-%m-%d'), matches_snapshot)
 
-    return matchs_du_jour, df_top5_hr, df_top5_runs, df_victoires
+    return matchs_du_jour, df_top5_hr, df_top5_runs, df_victoires, df_hr_all, df_runs_all
 
 
 # ============================================================
@@ -2730,7 +2767,7 @@ def construire_resume_matchs_du_jour(annee: int, cache_bust: int = 0):
     # paire suffit donc à identifier chaque match sans ambiguïté (pas de "game_id"
     # exposé par npb.jp comme c'est le cas avec MLB StatsAPI).
     try:
-        matchs_lineups, _, _, df_victoires = construire_donnees_hot_pronostics(annee)
+        matchs_lineups, _, _, df_victoires, *_ = construire_donnees_hot_pronostics(annee)
     except Exception:
         matchs_lineups, df_victoires = [], pd.DataFrame()
 
@@ -2944,7 +2981,13 @@ def formater_recommandation_totaux_over_under(total_projete, ligne):
     )
 
 
-def assembler_lignes_recap_hot_pronostics(matchs_jour: list, df_victoires, annee: int) -> list:
+def assembler_lignes_recap_hot_pronostics(
+    matchs_jour: list,
+    df_victoires,
+    annee: int,
+    df_hr_all=None,
+    df_runs_all=None,
+) -> list:
     """
     Agrège le tableau de bord Hot Pronostics à partir des données DÉJÀ calculées
     (`construire_donnees_hot_pronostics`) + caches existants (ligne O/U, cotes, resumes).
@@ -3009,6 +3052,9 @@ def assembler_lignes_recap_hot_pronostics(matchs_jour: list, df_victoires, annee
         )
         classement_ou = classer_recommandation_totaux_over_under(total_proj, ligne_ou)
 
+        reco_hr = _meilleure_reco_joueur_match(df_hr_all, home, away, 'Indice HR (/100)')
+        reco_run = _meilleure_reco_joueur_match(df_runs_all, home, away, 'Indice Run (/100)')
+
         lignes.append({
             'confrontation': f"{away} vs {home}",
             'heure': f"⏰ {heure}" if heure and heure != '—' else "⏰ —",
@@ -3018,6 +3064,18 @@ def assembler_lignes_recap_hot_pronostics(matchs_jour: list, df_victoires, annee
             'value_label': value_label,
             'ou_kind': classement_ou['code'] if classement_ou else None,
             'ou_resume': classement_ou['resume'] if classement_ou else 'Projection indisponible',
+            'reco_hr': (
+                f"{reco_hr['joueur']} ({reco_hr['equipe']})" if reco_hr and reco_hr.get('joueur') else None
+            ),
+            'reco_hr_detail': (
+                f"Indice {reco_hr['indice']:.0f}/100" if reco_hr and reco_hr.get('indice') is not None else None
+            ),
+            'reco_run': (
+                f"{reco_run['joueur']} ({reco_run['equipe']})" if reco_run and reco_run.get('joueur') else None
+            ),
+            'reco_run_detail': (
+                f"Indice {reco_run['indice']:.0f}/100" if reco_run and reco_run.get('indice') is not None else None
+            ),
         })
     return lignes
 
@@ -3386,8 +3444,12 @@ with onglets[1]:
             )
         else:
             with st.spinner("Analyse de tous les matchs du jour (lanceurs annoncés, forme récente des 10 derniers matchs)..."):
-                matchs_jour, df_top5_hr, df_top5_runs, df_victoires = construire_donnees_hot_pronostics(annee)
-                lignes_recap = assembler_lignes_recap_hot_pronostics(matchs_jour, df_victoires, annee)
+                matchs_jour, df_top5_hr, df_top5_runs, df_victoires, df_hr_all, df_runs_all = (
+                    construire_donnees_hot_pronostics(annee)
+                )
+                lignes_recap = assembler_lignes_recap_hot_pronostics(
+                    matchs_jour, df_victoires, annee, df_hr_all, df_runs_all
+                )
 
             if not matchs_jour:
                 st.info("Aucun match n'est prévu aujourd'hui (heure du Japon).")

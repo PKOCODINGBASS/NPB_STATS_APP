@@ -381,13 +381,12 @@ def render_footer(league_label: str, date_str: str) -> None:
 
 def afficher_tableau_recap_hot_pronostics(rows: list) -> None:
     """
-    Affiche le tableau de bord Hot Pronostics (3 colonnes).
-    Rendu 100% Streamlit natif (pas de <table> HTML) : Streamlit sanitise les
-    tableaux HTML et les affichait comme du code brut.
+    Affiche le tableau de bord Hot Pronostics.
+    Rendu 100% Streamlit natif (pas de <table> HTML).
 
     `rows` = liste de dicts déjà agrégés (aucune requête ici) :
       confrontation, heure, favori, favori_pct, value_kind, value_label,
-      ou_kind ('OVER'|'UNDER'|'NO_BET'|None), ou_resume
+      ou_kind, ou_resume, reco_hr, reco_hr_detail, reco_run, reco_run_detail
     """
     if not rows:
         st.info("Aucun match à afficher dans le tableau de bord du jour.")
@@ -406,17 +405,19 @@ def afficher_tableau_recap_hot_pronostics(rows: list) -> None:
     }
 
     # En-tête des colonnes
-    h1, h2, h3 = st.columns([1.1, 1.4, 1.4])
+    h1, h2, h3, h4 = st.columns([1.0, 1.15, 1.05, 1.2])
     with h1:
         st.markdown("**Confrontation**")
     with h2:
-        st.markdown("**Recommandation Vainqueur & Value**")
+        st.markdown("**Vainqueur & Value**")
     with h3:
-        st.markdown("**Recommandation Totaux (O/U)**")
+        st.markdown("**Totaux (O/U)**")
+    with h4:
+        st.markdown("**Joueurs (HR / Run)**")
 
     for row in rows:
         with st.container(border=True):
-            c1, c2, c3 = st.columns([1.1, 1.4, 1.4])
+            c1, c2, c3, c4 = st.columns([1.0, 1.15, 1.05, 1.2])
 
             with c1:
                 st.markdown(f"**{row.get('confrontation') or '—'}**")
@@ -440,6 +441,16 @@ def afficher_tableau_recap_hot_pronostics(rows: list) -> None:
                 ou_kind = row.get("ou_kind")
                 st.markdown(f"**{ou_labels.get(ou_kind, '⚪ N/A')}**")
                 st.caption(str(row.get("ou_resume") or "Projection indisponible"))
+
+            with c4:
+                reco_hr = row.get("reco_hr") or "—"
+                reco_run = row.get("reco_run") or "—"
+                st.markdown(f"**💣 HR :** {reco_hr}")
+                if row.get("reco_hr_detail"):
+                    st.caption(str(row["reco_hr_detail"]))
+                st.markdown(f"**🏃 Run :** {reco_run}")
+                if row.get("reco_run_detail"):
+                    st.caption(str(row["reco_run_detail"]))
 
 
 def ensure_shared_on_path(app_file: str) -> None:
