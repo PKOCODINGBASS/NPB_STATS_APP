@@ -379,6 +379,76 @@ def render_footer(league_label: str, date_str: str) -> None:
     )
 
 
+def afficher_outil_coherence_totaux(
+    total_match,
+    total_vue_equipe,
+    ligne,
+    code_match=None,
+    code_vue=None,
+) -> None:
+    """
+    Panneau de corrélation Over/Under entre :
+      - projection MATCH (Hot Pronostics) = somme des moyennes offensives des 2 équipes
+      - projection VUE ÉQUIPE (Prédictions du jour) = predire_runs_match (proxy RA + lanceur)
+    Affichage uniquement : ne recalcule aucun modèle.
+    """
+    def _fmt(v):
+        if v is None:
+            return "—"
+        try:
+            return f"{float(v):.1f}"
+        except (TypeError, ValueError):
+            return "—"
+
+    aligne = None
+    if code_match and code_vue:
+        aligne = code_match == code_vue
+    elif total_match is not None and total_vue_equipe is not None:
+        try:
+            aligne = abs(float(total_match) - float(total_vue_equipe)) <= 1.0
+        except (TypeError, ValueError):
+            aligne = None
+
+    if aligne is True:
+        statut = "✅ Aligné"
+        detail = (
+            "Les deux vues indiquent le même sens Over/Under (ou des projections "
+            "très proches)."
+        )
+    elif aligne is False:
+        statut = "⚠️ Divergent"
+        detail = (
+            "Écart attendu : Hot Pronostics utilise la somme des moyennes de runs "
+            "marqués des **deux** équipes, alors que la vue équipe ajuste l'attaque "
+            "sélectionnée au lanceur adverse et approxime l'attaque adverse via les "
+            "runs **concédés** par l'équipe choisie."
+        )
+    else:
+        statut = "⚪ Données partielles"
+        detail = "Impossible de comparer les deux projections pour ce match."
+
+    with st.expander(f"🔗 Cohérence Totaux Hot Pronostics ↔ Prédictions — {statut}", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("**Projection match (Hot)**")
+            st.markdown(f"### {_fmt(total_match)}")
+            st.caption(f"Reco : {code_match or 'N/A'}")
+        with c2:
+            st.markdown("**Projection vue équipe**")
+            st.markdown(f"### {_fmt(total_vue_equipe)}")
+            st.caption(f"Reco : {code_vue or 'N/A'}")
+        with c3:
+            st.markdown("**Ligne saison**")
+            st.markdown(f"### {_fmt(ligne)}")
+            st.caption("Moyenne réelle des totaux")
+        st.caption(detail)
+        st.caption(
+            "La **Recommandation Totaux** affichée ci-dessus suit la projection match "
+            "(même source que le tableau Hot Pronostics), pour éviter les Over/Under "
+            "contradictoires entre onglets."
+        )
+
+
 def afficher_tableau_recap_hot_pronostics(rows: list) -> None:
     """
     Affiche le tableau de bord Hot Pronostics.

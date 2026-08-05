@@ -59,6 +59,7 @@ render_section_title = _ps_theme.render_section_title
 afficher_cartes_matchs = _ps_theme.afficher_cartes_matchs
 afficher_badge_value_bet = _ps_theme.afficher_badge_value_bet
 afficher_tableau_recap_hot_pronostics = _ps_theme.afficher_tableau_recap_hot_pronostics
+afficher_outil_coherence_totaux = _ps_theme.afficher_outil_coherence_totaux
 render_footer = _ps_theme.render_footer
 render_prediction_match_banner = _ps_theme.render_prediction_match_banner
 
@@ -1555,6 +1556,10 @@ def obtenir_match_du_jour(code_equipe: str):
     return {
         'adversaire': nom_adverse,
         'est_domicile': est_domicile,
+        'code_home': ligne['code_home'],
+        'code_away': ligne['code_away'],
+        'code_equipe': code_equipe,
+        'code_adverse': code_adverse,
         # Ligue du match en cours : cette application ne scrape QUE npb.jp, donc tous
         # les matchs retournés ici sont des matchs NPB. Le champ est néanmoins explicite
         # (plutôt que supposé implicitement par le code appelant) afin que la logique de
@@ -2950,12 +2955,26 @@ def classer_recommandation_totaux_over_under(total_projete, ligne):
     return {'code': 'UNDER', 'resume': resume}
 
 
+def _filtrer_phrases_over_under_conseils(conseils) -> list:
+    """
+    Retire les phrases Over/Under de `generer_recommandation_pari` pour éviter un
+    second message O/U contradictoire avec Hot Pronostics. Affichage seul.
+    """
+    marqueurs = (
+        "Jouer 'Over",
+        "Jouer 'Under",
+        "Tendance offensive",
+        "Match très défensif",
+        "Projection de runs",
+    )
+    return [c for c in (conseils or []) if not any(m in c for m in marqueurs)]
+
+
 def formater_recommandation_totaux_over_under(total_projete, ligne):
     """
     Affichage UNIQUEMENT (aucune modification du moteur de prédiction) :
-    compare le total de runs DÉJÀ projeté par l'algo (`prediction_runs['total_match']`,
-    soit Runs équipe + proxy adverse) à la ligne Over/Under de référence
-    (`obtenir_ligne_over_under_saison`, même cut-off que le bilan de la veille).
+    compare une projection de total déjà calculée à la ligne Over/Under de référence.
+    Pour la cohérence inter-onglets, passer la projection MATCH (`_total_runs_predit`).
     """
     if total_projete is None or ligne is None:
         return None
@@ -3457,6 +3476,10 @@ with onglets[1]:
                 # --- Tableau de bord global : TOUT PREMIER élément de l'onglet ---
                 st.subheader("📋 Tableau de bord du jour")
                 afficher_tableau_recap_hot_pronostics(lignes_recap)
+                st.caption(
+                    "Totaux (O/U) : somme des moyennes de runs marqués des 2 équipes (10 derniers matchs) "
+                    "vs ligne saison — même source que la Recommandation Totaux de Prédictions du jour."
+                )
 
                 st.caption(
                     "⚠️ Estimations statistiques automatiques calculées à partir des lanceurs partants "
@@ -3851,14 +3874,23 @@ with onglets[3]:
                 joueurs_a_surveiller,
                 ligue=detecter_ligue_match(match_du_jour),
             )
-            # Affichage Over/Under explicite : comparaison finale UNIQUEMENT
-            # (projection déjà calculée vs ligne du bilan de la veille).
-            # Ne touche ni à predire_runs_match ni à generer_recommandation_pari.
-            reco_totaux = formater_recommandation_totaux_over_under(
-                prediction_runs.get('total_match') if prediction_runs else None,
-                obtenir_ligne_over_under_saison(annee),
+            # Totaux O/U : même projection MATCH que Hot Pronostics.
+            # predire_runs_match reste inchangé pour le module "Prédiction des Runs".
+            ligne_ou = obtenir_ligne_over_under_saison(annee)
+            resume_home = obtenir_resume_10_derniers_matchs_equipe(
+                annee, (match_du_jour.get('code_home') or '').upper()
             )
-            lignes_reco = list(conseils_paris or [])
+            resume_away = obtenir_resume_10_derniers_matchs_equipe(
+                annee, (match_du_jour.get('code_away') or '').upper()
+            )
+            total_match_hot = _total_runs_predit(resume_home, resume_away)
+            total_vue_equipe = (
+                prediction_runs.get('total_match') if prediction_runs else None
+            )
+            classement_match = classer_recommandation_totaux_over_under(total_match_hot, ligne_ou)
+            classement_vue = classer_recommandation_totaux_over_under(total_vue_equipe, ligne_ou)
+            reco_totaux = formater_recommandation_totaux_over_under(total_match_hot, ligne_ou)
+            lignes_reco = _filtrer_phrases_over_under_conseils(conseils_paris)
             if reco_totaux:
                 lignes_reco.append(reco_totaux)
             if lignes_reco:
@@ -3866,6 +3898,13 @@ with onglets[3]:
                     "**💡 Recommandation de Pari Optimisée**\n\n"
                     + "\n\n".join(lignes_reco)
                 )
+            afficher_outil_coherence_totaux(
+                total_match_hot,
+                total_vue_equipe,
+                ligne_ou,
+                code_match=classement_match['code'] if classement_match else None,
+                code_vue=classement_vue['code'] if classement_vue else None,
+            )
 
             st.caption(
                 "Estimation basée sur (1) l'ERA/WHIP des lanceurs partants annoncés des deux "
