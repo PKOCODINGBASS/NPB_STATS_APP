@@ -1,10 +1,10 @@
 """
-Design system partagé — thématisation MLB / NPB / KBO.
+Design system partagé — thématisation MLB / NPB / KBO / NHL.
 
 Usage dans chaque app (après `st.set_page_config`) :
 
     from shared.theme import apply_theme, render_page_header, afficher_cartes_matchs
-    apply_theme("mlb")  # ou "npb" / "kbo"
+    apply_theme("mlb")  # ou "npb" / "kbo" / "nhl"
 """
 
 from __future__ import annotations
@@ -72,6 +72,24 @@ LEAGUE_THEMES: dict[str, dict[str, str]] = {
         "danger": "#E31C23",        # Touche de rouge dynamique
         "glow": "rgba(0, 51, 160, 0.12)",
         "header_grad": "linear-gradient(135deg, #0033A0 0%, #1A4BB8 55%, #8E97A8 120%)",
+    },
+    "nhl": {
+        "label": "NHL",
+        "full_name": "National Hockey League",
+        "primary": "#111111",       # Noir glace
+        "secondary": "#CF0A2C",     # Rouge NHL
+        "accent": "#FFFFFF",
+        "on_primary": "#FFFFFF",
+        "bg": "#F4F6F8",
+        "card_bg": "#FFFFFF",
+        "chip_bg": "#ECEFF2",
+        "text": "#121417",
+        "muted": "#5C6570",
+        "border": "rgba(17, 17, 17, 0.12)",
+        "success": "#1F7A4D",
+        "danger": "#CF0A2C",
+        "glow": "rgba(207, 10, 44, 0.12)",
+        "header_grad": "linear-gradient(135deg, #111111 0%, #2B2B2B 52%, #CF0A2C 125%)",
     },
 }
 
@@ -449,7 +467,14 @@ def afficher_outil_coherence_totaux(
         )
 
 
-def afficher_tableau_recap_hot_pronostics(rows: list) -> None:
+def afficher_tableau_recap_hot_pronostics(
+    rows: list,
+    *,
+    label_joueurs: str = "Joueurs (HR / Run)",
+    label_primary: str = "💣 HR",
+    label_secondary: str = "🏃 Run",
+    show_ecart: bool = False,
+) -> None:
     """
     Affiche le tableau de bord Hot Pronostics.
     Rendu 100% Streamlit natif (pas de <table> HTML).
@@ -457,6 +482,7 @@ def afficher_tableau_recap_hot_pronostics(rows: list) -> None:
     `rows` = liste de dicts déjà agrégés (aucune requête ici) :
       confrontation, heure, favori, favori_pct, value_kind, value_label,
       ou_kind, ou_resume, reco_hr, reco_hr_detail, reco_run, reco_run_detail
+      (+ option NHL) ecart_kind, ecart_resume
     """
     if not rows:
         st.info("Aucun match à afficher dans le tableau de bord du jour.")
@@ -474,20 +500,37 @@ def afficher_tableau_recap_hot_pronostics(rows: list) -> None:
         "NO_BET": "⚠️ NO BET",
     }
 
-    # En-tête des colonnes
-    h1, h2, h3, h4 = st.columns([1.0, 1.15, 1.05, 1.2])
-    with h1:
-        st.markdown("**Confrontation**")
-    with h2:
-        st.markdown("**Vainqueur & Value**")
-    with h3:
-        st.markdown("**Totaux (O/U)**")
-    with h4:
-        st.markdown("**Joueurs (HR / Run)**")
+    if show_ecart:
+        widths = [1.0, 1.05, 0.95, 0.95, 1.15]
+        h1, h2, h3, h4, h5 = st.columns(widths)
+        with h1:
+            st.markdown("**Confrontation**")
+        with h2:
+            st.markdown("**Vainqueur & Value**")
+        with h3:
+            st.markdown("**Totaux (O/U)**")
+        with h4:
+            st.markdown("**Écart de points**")
+        with h5:
+            st.markdown(f"**{label_joueurs}**")
+    else:
+        widths = [1.0, 1.15, 1.05, 1.2]
+        h1, h2, h3, h4 = st.columns(widths)
+        with h1:
+            st.markdown("**Confrontation**")
+        with h2:
+            st.markdown("**Vainqueur & Value**")
+        with h3:
+            st.markdown("**Totaux (O/U)**")
+        with h4:
+            st.markdown(f"**{label_joueurs}**")
 
     for row in rows:
         with st.container(border=True):
-            c1, c2, c3, c4 = st.columns([1.0, 1.15, 1.05, 1.2])
+            cols = st.columns(widths)
+            c1, c2, c3 = cols[0], cols[1], cols[2]
+            c_players = cols[-1]
+            c_ecart = cols[3] if show_ecart else None
 
             with c1:
                 st.markdown(f"**{row.get('confrontation') or '—'}**")
@@ -512,13 +555,19 @@ def afficher_tableau_recap_hot_pronostics(rows: list) -> None:
                 st.markdown(f"**{ou_labels.get(ou_kind, '⚪ N/A')}**")
                 st.caption(str(row.get("ou_resume") or "Projection indisponible"))
 
-            with c4:
+            if c_ecart is not None:
+                with c_ecart:
+                    ecart_kind = row.get("ecart_kind")
+                    st.markdown(f"**{ou_labels.get(ecart_kind, row.get('ecart_label') or '⚪ N/A')}**")
+                    st.caption(str(row.get("ecart_resume") or "Écart indisponible"))
+
+            with c_players:
                 reco_hr = row.get("reco_hr") or "—"
                 reco_run = row.get("reco_run") or "—"
-                st.markdown(f"**💣 HR :** {reco_hr}")
+                st.markdown(f"**{label_primary} :** {reco_hr}")
                 if row.get("reco_hr_detail"):
                     st.caption(str(row["reco_hr_detail"]))
-                st.markdown(f"**🏃 Run :** {reco_run}")
+                st.markdown(f"**{label_secondary} :** {reco_run}")
                 if row.get("reco_run_detail"):
                     st.caption(str(row["reco_run_detail"]))
 
