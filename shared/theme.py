@@ -474,6 +474,7 @@ def afficher_tableau_recap_hot_pronostics(
     label_primary: str = "💣 HR",
     label_secondary: str = "🏃 Run",
     show_ecart: bool = False,
+    show_runs_equipes: bool = False,
 ) -> None:
     """
     Affiche le tableau de bord Hot Pronostics.
@@ -483,6 +484,7 @@ def afficher_tableau_recap_hot_pronostics(
       confrontation, heure, favori, favori_pct, value_kind, value_label,
       ou_kind, ou_resume, reco_hr, reco_hr_detail, reco_run, reco_run_detail
       (+ option NHL) ecart_kind, ecart_resume
+      (+ option baseball) runs_away, runs_home, runs_away_label, runs_home_label
     """
     if not rows:
         st.info("Aucun match à afficher dans le tableau de bord du jour.")
@@ -500,37 +502,52 @@ def afficher_tableau_recap_hot_pronostics(
         "NO_BET": "⚠️ NO BET",
     }
 
+    def _fmt_runs(v):
+        if v is None:
+            return "—"
+        try:
+            return f"{float(v):.1f}"
+        except (TypeError, ValueError):
+            return "—"
+
     if show_ecart:
         widths = [1.0, 1.05, 0.95, 0.95, 1.15]
-        h1, h2, h3, h4, h5 = st.columns(widths)
-        with h1:
-            st.markdown("**Confrontation**")
-        with h2:
-            st.markdown("**Vainqueur & Value**")
-        with h3:
-            st.markdown("**Totaux (O/U)**")
-        with h4:
-            st.markdown("**Écart de points**")
-        with h5:
-            st.markdown(f"**{label_joueurs}**")
+        headers = [
+            "Confrontation",
+            "Vainqueur & Value",
+            "Totaux (O/U)",
+            "Écart de points",
+            label_joueurs,
+        ]
+    elif show_runs_equipes:
+        widths = [1.0, 1.05, 0.95, 1.0, 1.15]
+        headers = [
+            "Confrontation",
+            "Vainqueur & Value",
+            "Totaux (O/U)",
+            "Runs / équipe",
+            label_joueurs,
+        ]
     else:
         widths = [1.0, 1.15, 1.05, 1.2]
-        h1, h2, h3, h4 = st.columns(widths)
-        with h1:
-            st.markdown("**Confrontation**")
-        with h2:
-            st.markdown("**Vainqueur & Value**")
-        with h3:
-            st.markdown("**Totaux (O/U)**")
-        with h4:
-            st.markdown(f"**{label_joueurs}**")
+        headers = [
+            "Confrontation",
+            "Vainqueur & Value",
+            "Totaux (O/U)",
+            label_joueurs,
+        ]
+
+    header_cols = st.columns(widths)
+    for col, title in zip(header_cols, headers):
+        with col:
+            st.markdown(f"**{title}**")
 
     for row in rows:
         with st.container(border=True):
             cols = st.columns(widths)
             c1, c2, c3 = cols[0], cols[1], cols[2]
             c_players = cols[-1]
-            c_ecart = cols[3] if show_ecart else None
+            c_extra = cols[3] if (show_ecart or show_runs_equipes) else None
 
             with c1:
                 st.markdown(f"**{row.get('confrontation') or '—'}**")
@@ -555,11 +572,24 @@ def afficher_tableau_recap_hot_pronostics(
                 st.markdown(f"**{ou_labels.get(ou_kind, '⚪ N/A')}**")
                 st.caption(str(row.get("ou_resume") or "Projection indisponible"))
 
-            if c_ecart is not None:
-                with c_ecart:
-                    ecart_kind = row.get("ecart_kind")
-                    st.markdown(f"**{ou_labels.get(ecart_kind, row.get('ecart_label') or '⚪ N/A')}**")
-                    st.caption(str(row.get("ecart_resume") or "Écart indisponible"))
+            if c_extra is not None:
+                with c_extra:
+                    if show_ecart:
+                        ecart_kind = row.get("ecart_kind")
+                        st.markdown(
+                            f"**{ou_labels.get(ecart_kind, row.get('ecart_label') or '⚪ N/A')}**"
+                        )
+                        st.caption(str(row.get("ecart_resume") or "Écart indisponible"))
+                    else:
+                        away_lab = row.get("runs_away_label") or "Ext"
+                        home_lab = row.get("runs_home_label") or "Dom"
+                        st.markdown(
+                            f"**{away_lab} :** {_fmt_runs(row.get('runs_away'))}"
+                        )
+                        st.markdown(
+                            f"**{home_lab} :** {_fmt_runs(row.get('runs_home'))}"
+                        )
+                        st.caption("Moy. runs (10 derniers)")
 
             with c_players:
                 reco_hr = row.get("reco_hr") or "—"
