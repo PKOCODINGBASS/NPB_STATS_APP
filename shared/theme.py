@@ -592,14 +592,23 @@ def afficher_tableau_recap_hot_pronostics(
                         st.caption("Moy. runs (10 derniers)")
 
             with c_players:
-                reco_hr = row.get("reco_hr") or "—"
-                reco_run = row.get("reco_run") or "—"
-                st.markdown(f"**{label_primary} :** {reco_hr}")
-                if row.get("reco_hr_detail"):
-                    st.caption(str(row["reco_hr_detail"]))
-                st.markdown(f"**{label_secondary} :** {reco_run}")
-                if row.get("reco_run_detail"):
-                    st.caption(str(row["reco_run_detail"]))
+                def _affiche_recos(label: str, texte, detail):
+                    st.markdown(f"**{label} :**")
+                    if not texte or texte == "—":
+                        st.caption("—")
+                        return
+                    # Plusieurs joueurs séparés par " · " → une ligne chacun
+                    parties = [p.strip() for p in str(texte).split(" · ") if p.strip()]
+                    if len(parties) > 1:
+                        for i, p in enumerate(parties, 1):
+                            st.markdown(f"{i}. {p}")
+                    else:
+                        st.markdown(parties[0] if parties else "—")
+                    if detail:
+                        st.caption(str(detail))
+
+                _affiche_recos(label_primary, row.get("reco_hr"), row.get("reco_hr_detail"))
+                _affiche_recos(label_secondary, row.get("reco_run"), row.get("reco_run_detail"))
 
 
 def ensure_shared_on_path(app_file: str) -> None:

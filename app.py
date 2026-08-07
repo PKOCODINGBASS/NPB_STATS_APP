@@ -2413,23 +2413,55 @@ def _calculer_top5_runs_npb(candidats: list) -> pd.DataFrame:
     return df.head(5).reset_index(drop=True)
 
 
-def _meilleure_reco_joueur_match(df_ranked, home: str, away: str, indice_col: str):
-    """Meilleur joueur déjà classé pour une confrontation — sans recalcul."""
+def _top_recos_joueurs_match(df_ranked, home: str, away: str, indice_col: str, n: int = 3) -> list:
+    """
+    Top `n` joueurs déjà classés pour UNE confrontation (home/away), sans recalcul.
+    Retourne une liste de dicts {'joueur', 'equipe', 'indice'}.
+    """
     if df_ranked is None or getattr(df_ranked, 'empty', True):
-        return None
+        return []
     mask = (
         ((df_ranked['Équipe'] == home) & (df_ranked['Adversaire'] == away))
         | ((df_ranked['Équipe'] == away) & (df_ranked['Adversaire'] == home))
     )
-    sous = df_ranked.loc[mask]
-    if sous.empty:
-        return None
-    best = sous.iloc[0]
-    return {
-        'joueur': best.get('Joueur'),
-        'equipe': best.get('Équipe'),
-        'indice': best.get(indice_col),
-    }
+    sous = df_ranked.loc[mask].head(max(1, int(n)))
+    recos = []
+    for _, row in sous.iterrows():
+        joueur = row.get('Joueur')
+        if not joueur:
+            continue
+        recos.append({
+            'joueur': joueur,
+            'equipe': row.get('Équipe'),
+            'indice': row.get(indice_col),
+        })
+    return recos
+
+
+def _formater_recos_joueurs_hot(recos: list):
+    """Formate les top recos Hot Pronostics : (texte joueurs, détail indices)."""
+    if not recos:
+        return None, None
+    noms, indices = [], []
+    for r in recos:
+        joueur = r.get('joueur')
+        if not joueur:
+            continue
+        equipe = r.get('equipe') or '?'
+        noms.append(f"{joueur} ({equipe})")
+        indice = r.get('indice')
+        if indice is not None and not pd.isna(indice):
+            indices.append(f"{float(indice):.0f}")
+    if not noms:
+        return None, None
+    detail = f"Indices {' · '.join(indices)}" if indices else None
+    return " · ".join(noms), detail
+
+
+def _meilleure_reco_joueur_match(df_ranked, home: str, away: str, indice_col: str):
+    """Meilleur joueur d'une confrontation (raccourci du top 1)."""
+    recos = _top_recos_joueurs_match(df_ranked, home, away, indice_col, n=1)
+    return recos[0] if recos else None
 
 
 def _total_runs_predit(resume_home, resume_away):
@@ -2448,14 +2480,14 @@ def _total_runs_predit(resume_home, resume_away):
     return round(float(moyenne_home) + float(moyenne_away), 2)
 
 
-def _top_candidats_hr(resume_camp, n: int = 2) -> list:
+def _top_candidats_hr(resume_camp, n: int = 3) -> list:
     """Les `n` joueurs les plus en forme au HR (10 derniers matchs) d'une équipe."""
     if not resume_camp or not resume_camp.get('cumul_hr'):
         return []
     return [nom for nom, _ in sorted(resume_camp['cumul_hr'].items(), key=lambda x: x[1], reverse=True)[:n]]
 
 
-def _top_candidats_runs(resume_camp, n: int = 2) -> list:
+def _top_candidats_runs(resume_camp, n: int = 3) -> list:
     """Les `n` joueurs les plus en forme au run (10 derniers matchs) d'une équipe."""
     if not resume_camp or not resume_camp.get('cumul_runs'):
         return []
@@ -3161,8 +3193,12 @@ def assembler_lignes_recap_hot_pronostics(
         total_proj = _total_runs_predit(resume_home, resume_away)
         classement_ou = classer_recommandation_totaux_over_under(total_proj, ligne_ou)
 
-        reco_hr = _meilleure_reco_joueur_match(df_hr_all, home, away, 'Indice HR (/100)')
-        reco_run = _meilleure_reco_joueur_match(df_runs_all, home, away, 'Indice Run (/100)')
+        reco_hr_txt, reco_hr_detail = _formater_recos_joueurs_hot(
+            _top_recos_joueurs_match(df_hr_all, home, away, 'Indice HR (/100)', n=3)
+        )
+        reco_run_txt, reco_run_detail = _formater_recos_joueurs_hot(
+            _top_recos_joueurs_match(df_runs_all, home, away, 'Indice Run (/100)', n=3)
+        )
 
         lignes.append({
             'confrontation': f"{away} vs {home}",
@@ -3177,18 +3213,10 @@ def assembler_lignes_recap_hot_pronostics(
             'runs_home': None if runs_home is None or pd.isna(runs_home) else round(float(runs_home), 1),
             'runs_away_label': away,
             'runs_home_label': home,
-            'reco_hr': (
-                f"{reco_hr['joueur']} ({reco_hr['equipe']})" if reco_hr and reco_hr.get('joueur') else None
-            ),
-            'reco_hr_detail': (
-                f"Indice {reco_hr['indice']:.0f}/100" if reco_hr and reco_hr.get('indice') is not None else None
-            ),
-            'reco_run': (
-                f"{reco_run['joueur']} ({reco_run['equipe']})" if reco_run and reco_run.get('joueur') else None
-            ),
-            'reco_run_detail': (
-                f"Indice {reco_run['indice']:.0f}/100" if reco_run and reco_run.get('indice') is not None else None
-            ),
+            'reco_hr': reco_hr_txt,
+            'reco_hr_detail': reco_hr_detail,
+            'reco_run': reco_run_txt,
+            'reco_run_detail': reco_run_detail,
         })
     return lignes
 
