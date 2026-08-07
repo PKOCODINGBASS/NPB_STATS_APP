@@ -2958,11 +2958,24 @@ def _noms_joueurs_correspondent(nom_predit: str, nom_reel: str) -> bool:
     return False
 
 
+def _nb_marque_joueur(nom_predit: str, scoreurs: list) -> int:
+    """Nombre marqué (runs ou HR) par un candidat dans la liste de scoreurs réels."""
+    for nom_reel, nb in scoreurs or []:
+        try:
+            n = int(nb or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n > 0 and _noms_joueurs_correspondent(nom_predit, nom_reel):
+            return n
+    return 0
+
+
 def _bilan_joueurs_predits(candidats_home, candidats_away, scoreurs_home, scoreurs_away, label: str):
     """
     Retourne (texte, icône) pour les colonnes "HR prédit" / "Run prédit" du bilan :
     ✅ si au moins un candidat archivé apparaît parmi les scoreurs réels du match,
     ❌ si des candidats étaient archivés mais aucun n'a marqué, ⏳ sinon.
+    Les validés affichent le nombre réel (ex. `Maki (2 runs)`).
     """
     preds = []
     vus = set()
@@ -2975,14 +2988,35 @@ def _bilan_joueurs_predits(candidats_home, candidats_away, scoreurs_home, scoreu
         return "Prédiction non disponible", "⏳"
 
     scoreurs = list(scoreurs_home or []) + list(scoreurs_away or [])
-    valides = [
-        p for p in preds
-        if any(nb and _noms_joueurs_correspondent(p, nom_reel) for nom_reel, nb in scoreurs)
-    ]
+    unite = "HR" if label == "HR" else "run"
+    valides = []
+    for p in preds:
+        nb = _nb_marque_joueur(p, scoreurs)
+        if nb:
+            suffixe = unite if (label == "HR" or nb == 1) else "runs"
+            valides.append(f"{p} ({nb} {suffixe})")
     liste_pred = ", ".join(preds[:4])
     if valides:
-        return f"{label} : {liste_pred} → validés : {', '.join(valides)}", "✅"
-    return f"{label} : {liste_pred} → aucun validé", "❌"
+        return f"{liste_pred} → validés : {', '.join(valides)}", "✅"
+    return f"{liste_pred} → aucun validé", "❌"
+
+
+def _candidats_runs_bilan_npb(pred, annee: int):
+    """Candidats Run archivés, ou repli forme 10 matchs si l'instantané est trop ancien."""
+    if not pred:
+        return None, None
+    home = list(pred.get('candidats_runs_home') or [])
+    away = list(pred.get('candidats_runs_away') or [])
+    if home or away:
+        return home, away
+    code_home = pred.get('code_home')
+    code_away = pred.get('code_away')
+    if not code_home or not code_away:
+        return [], []
+    return (
+        _top_candidats_runs(obtenir_resume_10_derniers_matchs_equipe(annee, code_home)),
+        _top_candidats_runs(obtenir_resume_10_derniers_matchs_equipe(annee, code_away)),
+    )
 
 
 def classer_recommandation_totaux_over_under(total_projete, ligne):
@@ -3271,10 +3305,9 @@ def construire_bilan_veille(annee: int, date_hier_str: str, cache_bust: int = 0)
             pred.get('candidats_hr_away') if pred else None,
             hr_home, hr_away, "HR",
         )
+        cand_runs_home, cand_runs_away = _candidats_runs_bilan_npb(pred, annee)
         texte_run, icone_run = _bilan_joueurs_predits(
-            pred.get('candidats_runs_home') if pred else None,
-            pred.get('candidats_runs_away') if pred else None,
-            runs_home, runs_away, "Run",
+            cand_runs_home, cand_runs_away, runs_home, runs_away, "Run",
         )
 
         lignes.append({
