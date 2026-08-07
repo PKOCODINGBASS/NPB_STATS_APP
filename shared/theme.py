@@ -510,31 +510,30 @@ def afficher_tableau_recap_hot_pronostics(
         except (TypeError, ValueError):
             return "—"
 
+    # Colonnes du bandeau (sans Joueurs) : les reco HR/Run passent sous le bandeau
+    # en pleine largeur pour ne plus allonger verticalement la dernière colonne.
     if show_ecart:
-        widths = [1.0, 1.05, 0.95, 0.95, 1.15]
+        widths = [1.0, 1.05, 0.95, 0.95]
         headers = [
             "Confrontation",
             "Vainqueur & Value",
             "Totaux (O/U)",
             "Écart de points",
-            label_joueurs,
         ]
     elif show_runs_equipes:
-        widths = [1.0, 1.05, 0.95, 1.0, 1.15]
+        widths = [1.0, 1.05, 0.95, 1.0]
         headers = [
             "Confrontation",
             "Vainqueur & Value",
             "Totaux (O/U)",
             "Runs / équipe",
-            label_joueurs,
         ]
     else:
-        widths = [1.0, 1.15, 1.05, 1.2]
+        widths = [1.0, 1.15, 1.05]
         headers = [
             "Confrontation",
             "Vainqueur & Value",
             "Totaux (O/U)",
-            label_joueurs,
         ]
 
     header_cols = st.columns(widths)
@@ -546,7 +545,6 @@ def afficher_tableau_recap_hot_pronostics(
         with st.container(border=True):
             cols = st.columns(widths)
             c1, c2, c3 = cols[0], cols[1], cols[2]
-            c_players = cols[-1]
             c_extra = cols[3] if (show_ecart or show_runs_equipes) else None
 
             with c1:
@@ -591,17 +589,16 @@ def afficher_tableau_recap_hot_pronostics(
                         )
                         st.caption("Moy. runs (10 derniers)")
 
-            with c_players:
-                # Une ligne HR + une ligne Run (compact) : les 3 joueurs restent
-                # séparés par " · " dans le texte déjà formaté côté app.
-                reco_hr = row.get("reco_hr") or "—"
-                reco_run = row.get("reco_run") or "—"
-                st.markdown(f"**{label_primary} :** {reco_hr}")
-                if row.get("reco_hr_detail"):
-                    st.caption(str(row["reco_hr_detail"]))
-                st.markdown(f"**{label_secondary} :** {reco_run}")
-                if row.get("reco_run_detail"):
-                    st.caption(str(row["reco_run_detail"]))
+            # Bloc joueurs sous les colonnes (pleine largeur)
+            st.markdown(f"**{label_joueurs}**")
+            reco_hr = row.get("reco_hr") or "—"
+            reco_run = row.get("reco_run") or "—"
+            st.markdown(f"**{label_primary} :** {reco_hr}")
+            if row.get("reco_hr_detail"):
+                st.caption(str(row["reco_hr_detail"]))
+            st.markdown(f"**{label_secondary} :** {reco_run}")
+            if row.get("reco_run_detail"):
+                st.caption(str(row["reco_run_detail"]))
 
 
 def ensure_shared_on_path(app_file: str) -> None:
