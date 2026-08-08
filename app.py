@@ -2115,13 +2115,31 @@ def generer_recommandation_pari(
                 f"📉 Projection de runs contenue. Conseil : Jouer 'Under {ligne_under} runs'."
             )
 
-    # --- Étape 3 : option joueur (universel) ---
-    if joueurs_a_surveiller:
-        meilleur_joueur = joueurs_a_surveiller[0]
-        if meilleur_joueur.get('confiance') in ('Élevée', 'Moyenne'):
+    # --- Étape 3 : options joueur séparées HR / Run (universel) ---
+    candidats_ok = [
+        j for j in (joueurs_a_surveiller or [])
+        if j.get('confiance') in ('Élevée', 'Moyenne')
+    ]
+    if candidats_ok:
+        meilleur_hr = max(
+            candidats_ok,
+            key=lambda j: (j.get('hr_10') or 0, j.get('indice') or 0),
+        )
+        meilleur_run = max(
+            candidats_ok,
+            key=lambda j: (j.get('runs_10') or 0, j.get('indice') or 0),
+        )
+        if (meilleur_hr.get('hr_10') or 0) > 0:
             conseils.append(
-                f"🎯 Option alternative : {meilleur_joueur['nom']} a une forte probabilité "
-                "de marquer un Run/HR aujourd'hui."
+                f"💣 Option HR : {meilleur_hr['nom']} a une forte probabilité "
+                f"de frapper un home run aujourd'hui "
+                f"({meilleur_hr.get('hr_10', 0)} HR / 10 matchs, confiance {meilleur_hr.get('confiance')})."
+            )
+        if (meilleur_run.get('runs_10') or 0) > 0:
+            conseils.append(
+                f"🏃 Option Run : {meilleur_run['nom']} a une forte probabilité "
+                f"de marquer un run aujourd'hui "
+                f"({meilleur_run.get('runs_10', 0)} run(s) / 10 matchs, confiance {meilleur_run.get('confiance')})."
             )
 
     return conseils
