@@ -230,28 +230,67 @@ def _charger_historique_predictions() -> dict:
         return {}
 
 
+def _match_a_commence_npb(statut) -> bool:
+    """True dès qu'un score est publié (match en cours ou terminé)."""
+    s = (statut or '').strip().lower()
+    return s in ('en cours', 'terminé', 'termine', 'final', 'live')
+
+
+def _cle_snapshot_match(m: dict) -> str:
+    gid = m.get('game_id')
+    if gid is not None and gid != '':
+        return f"gid:{gid}"
+    return f"teams:{m.get('code_home')}|{m.get('code_away')}|{m.get('home_name')}|{m.get('away_name')}"
+
+
+def _index_snapshots_par_cle(matches: list) -> dict:
+    return {_cle_snapshot_match(m): m for m in (matches or []) if isinstance(m, dict)}
+
+
+def _fusionner_snapshots_figes(existants: list, nouveaux: list, maintenant_iso: str) -> list:
+    """Conserve la dernière prédiction pré-match dès qu'un match a commencé."""
+    index_old = _index_snapshots_par_cle(existants)
+    merges, vus = [], set()
+    for m in nouveaux or []:
+        if not isinstance(m, dict):
+            continue
+        cle = _cle_snapshot_match(m)
+        vus.add(cle)
+        old = index_old.get(cle)
+        a_commence = _match_a_commence_npb(m.get('statut'))
+        if old and old.get('fige'):
+            merges.append(old)
+        elif old and a_commence:
+            frozen = dict(old)
+            frozen['fige'] = True
+            frozen['fige_le'] = old.get('fige_le') or maintenant_iso
+            frozen['statut'] = m.get('statut') or old.get('statut')
+            merges.append(frozen)
+        else:
+            new_m = dict(m)
+            new_m['fige'] = bool(a_commence)
+            if a_commence:
+                new_m['fige_le'] = maintenant_iso
+            merges.append(new_m)
+    for cle, old in index_old.items():
+        if cle not in vus and old.get('fige'):
+            merges.append(old)
+    return merges
+
+
 def _sauvegarder_predictions_du_jour(date_str: str, matches_snapshot: list) -> None:
     """
-    Archive l'instantané des prédictions du jour (`matches_snapshot`) sous la clé
-    `date_str`, à la fois dans le Gist GitHub privé configuré (source durable, cf.
-    `_obtenir_config_github`) ET dans le fichier local (repli/cache accessoire).
-    Appelée depuis `construire_donnees_hot_pronostics` (donc au maximum une fois
-    toutes les 30 min, son propre `ttl` de cache) : écrire à chaque appel écrase
-    simplement l'instantané du jour par la version la plus à jour (utile si les
-    lanceurs annoncés changent en cours de journée), ce qui est le comportement
-    recherché.
-
-    Purge au passage les entrées de plus de 30 jours, pour que l'historique ne
-    grossisse pas indéfiniment au fil des mois. Ne lève jamais d'exception : la
-    sauvegarde de l'historique est un "bonus" (bilan de la veille) qui ne doit jamais
-    faire planter le calcul des prédictions du jour lui-même en cas de souci réseau ou
-    d'écriture disque (permissions, disque plein, filesystem éphémère, etc.).
+    Archive l'instantané des prédictions du jour. Dès qu'un match a commencé, son
+    instantané est FIGÉ (dernière version pré-match) pour le bilan de la veille.
     """
     try:
         historique = _charger_historique_predictions()
+        maintenant_iso = datetime.now(TZ_JST).isoformat()
+        existants = (historique.get(date_str) or {}).get('matches') or []
+        merges = _fusionner_snapshots_figes(existants, matches_snapshot, maintenant_iso)
         historique[date_str] = {
-            'sauvegarde_le': datetime.now(TZ_JST).isoformat(),
-            'matches': matches_snapshot,
+            'sauvegarde_le': maintenant_iso,
+            'matches': merges,
         }
         date_limite = (datetime.now(TZ_JST) - timedelta(days=30)).strftime('%Y-%m-%d')
         historique = {d: v for d, v in historique.items() if d >= date_limite}
@@ -2430,10 +2469,16 @@ def _top_recos_joueurs_match(df_ranked, home: str, away: str, indice_col: str, n
         joueur = row.get('Joueur')
         if not joueur:
             continue
+        indice = row.get(indice_col)
+        if indice is not None and pd.isna(indice):
+            indice = None
+        elif indice is not None:
+            indice = float(indice)
         recos.append({
             'joueur': joueur,
             'equipe': row.get('Équipe'),
-            'indice': row.get(indice_col),
+            'indice': indice,
+            'joueur_id': None,
         })
     return recos
 
@@ -2456,6 +2501,26 @@ def _formater_recos_joueurs_hot(recos: list):
         return None, None
     detail = f"Indices {' · '.join(indices)}" if indices else None
     return " · ".join(noms), detail
+
+
+def _serialiser_recos_snapshot(recos: list) -> list:
+    out = []
+    for r in recos or []:
+        joueur = r.get('joueur')
+        if not joueur:
+            continue
+        indice = r.get('indice')
+        if indice is not None and pd.isna(indice):
+            indice = None
+        elif indice is not None:
+            indice = float(indice)
+        out.append({
+            'joueur': joueur,
+            'equipe': r.get('equipe'),
+            'indice': indice,
+            'joueur_id': r.get('joueur_id'),
+        })
+    return out
 
 
 def _meilleure_reco_joueur_match(df_ranked, home: str, away: str, indice_col: str):
@@ -2553,6 +2618,12 @@ def construire_donnees_hot_pronostics(annee: int):
             except Exception:
                 heure_paris_str = None
 
+        score_home, score_away = g.get('score_home'), g.get('score_away')
+        if pd.notna(score_home) and pd.notna(score_away):
+            statut = "Terminé" if (g.get('lanceur_gagnant') or g.get('lanceur_perdant')) else "En cours"
+        else:
+            statut = "Programmé"
+
         matchs_du_jour.append({
             'code_home': code_home,
             'code_away': code_away,
@@ -2562,6 +2633,7 @@ def construire_donnees_hot_pronostics(annee: int):
             'away_pitcher': infos_p_away,
             'heure_jst': heure_jst_str or "—",
             'heure_paris': heure_paris_str or "—",
+            'statut': statut,
         })
 
     if not matchs_du_jour:
@@ -2649,29 +2721,33 @@ def construire_donnees_hot_pronostics(annee: int):
     df_top5_runs = df_runs_all.head(5).reset_index(drop=True) if not df_runs_all.empty else df_runs_all
     df_victoires = pd.DataFrame(lignes_victoire)
 
-    # --- Archivage de l'instantané du jour (pour le "Bilan des Prédictions" de la
-    # veille, onglet Résumé, cf. `_sauvegarder_predictions_du_jour`) : on ne conserve
-    # que ce qui est nécessaire à une comparaison ultérieure avec le résultat réel une
-    # fois le match terminé (probabilité de victoire, total de runs projeté pour les
-    # deux équipes, et candidats HR / Run les plus en forme de chaque équipe).
-    matches_snapshot = [
-        {
+    # --- Archivage : reco_hr / reco_run = top 3 Hot Pronostics (indice), figés
+    # dès qu'un match a commencé (`_fusionner_snapshots_figes`).
+    matches_snapshot = []
+    for m, ligne_victoire in zip(matchs_du_jour, lignes_victoire):
+        home, away = m['home_name'], m['away_name']
+        matches_snapshot.append({
             'code_home': m['code_home'],
             'code_away': m['code_away'],
-            'home_name': m['home_name'],
-            'away_name': m['away_name'],
+            'home_name': home,
+            'away_name': away,
+            'statut': m.get('statut'),
             'proba_home': ligne_victoire.get('Proba Domicile (%)'),
             'proba_away': ligne_victoire.get('Proba Extérieur (%)'),
             'total_runs_predit': _total_runs_predit(
                 resumes_equipe.get(m['code_home']), resumes_equipe.get(m['code_away'])
             ),
+            'reco_hr': _serialiser_recos_snapshot(
+                _top_recos_joueurs_match(df_hr_all, home, away, 'Indice HR (/100)', n=3)
+            ),
+            'reco_run': _serialiser_recos_snapshot(
+                _top_recos_joueurs_match(df_runs_all, home, away, 'Indice Run (/100)', n=3)
+            ),
             'candidats_hr_home': _top_candidats_hr(resumes_equipe.get(m['code_home'])),
             'candidats_hr_away': _top_candidats_hr(resumes_equipe.get(m['code_away'])),
             'candidats_runs_home': _top_candidats_runs(resumes_equipe.get(m['code_home'])),
             'candidats_runs_away': _top_candidats_runs(resumes_equipe.get(m['code_away'])),
-        }
-        for m, ligne_victoire in zip(matchs_du_jour, lignes_victoire)
-    ]
+        })
     _sauvegarder_predictions_du_jour(maintenant_jst.strftime('%Y-%m-%d'), matches_snapshot)
 
     return matchs_du_jour, df_top5_hr, df_top5_runs, df_victoires, df_hr_all, df_runs_all
@@ -2985,49 +3061,66 @@ def _noms_joueurs_correspondent(nom_predit: str, nom_reel: str) -> bool:
     if pred == reel or pred in reel or reel in pred:
         return True
     pred_parts, reel_parts = pred.split(), reel.split()
-    if pred_parts and reel_parts and pred_parts[-1] == reel_parts[-1] and len(pred_parts[-1]) > 2:
+    if not pred_parts or not reel_parts:
+        return False
+    if pred_parts[-1] == reel_parts[-1] and len(pred_parts[-1]) > 2:
+        return True
+    if len(pred_parts) == 1 and pred_parts[0] == reel_parts[-1] and len(pred_parts[0]) > 2:
+        return True
+    if len(reel_parts) == 1 and reel_parts[0] == pred_parts[-1] and len(reel_parts[0]) > 2:
         return True
     return False
 
 
-def _nb_marque_joueur(nom_predit: str, scoreurs: list) -> int:
-    """Nombre marqué (runs ou HR) par un candidat dans la liste de scoreurs réels."""
-    for nom_reel, nb in scoreurs or []:
+def _nb_marque_joueur(pred_item, scoreurs: list) -> int:
+    """Nombre marqué par un candidat (`str` ou dict `{'joueur'}`)."""
+    nom_predit = pred_item.get('joueur') if isinstance(pred_item, dict) else pred_item
+    for item in scoreurs or []:
+        nom_reel, nb = item[0], item[1]
         try:
             n = int(nb or 0)
         except (TypeError, ValueError):
             n = 0
-        if n > 0 and _noms_joueurs_correspondent(nom_predit, nom_reel):
+        if n > 0 and nom_predit and _noms_joueurs_correspondent(nom_predit, nom_reel):
             return n
     return 0
 
 
-def _bilan_joueurs_predits(candidats_home, candidats_away, scoreurs_home, scoreurs_away, label: str):
-    """
-    Retourne (texte, icône) pour les colonnes "HR prédit" / "Run prédit" du bilan :
-    ✅ si au moins un candidat archivé apparaît parmi les scoreurs réels du match,
-    ❌ si des candidats étaient archivés mais aucun n'a marqué, ⏳ sinon.
-    Les validés affichent le nombre réel (ex. `Maki (2 runs)`).
-    """
-    preds = []
-    vus = set()
-    for nom in list(candidats_home or []) + list(candidats_away or []):
+def _preds_bilan_depuis_snapshot(pred, kind: str) -> list:
+    """Priorise reco_hr / reco_run (top 3 Hot), sinon listes home/away legacy."""
+    if not pred:
+        return []
+    recos = pred.get(f'reco_{kind}') or []
+    if recos:
+        return [r for r in recos if isinstance(r, dict) and r.get('joueur')]
+    home = pred.get(f'candidats_{kind}_home') or []
+    away = pred.get(f'candidats_{kind}_away') or []
+    preds, vus = [], set()
+    for nom in list(home) + list(away):
         if not nom or nom in vus:
             continue
         vus.add(nom)
-        preds.append(nom)
+        preds.append({'joueur': nom})
+    return preds
+
+
+def _bilan_joueurs_predits(preds, scoreurs_home, scoreurs_away, label: str):
+    """Retourne (texte, icône) pour HR prédit / Run prédit du bilan."""
     if not preds:
         return "Prédiction non disponible", "⏳"
 
     scoreurs = list(scoreurs_home or []) + list(scoreurs_away or [])
     unite = "HR" if label == "HR" else "run"
-    valides = []
+    valides, noms_pred = [], []
     for p in preds:
+        nom = p.get('joueur') if isinstance(p, dict) else p
+        if nom:
+            noms_pred.append(nom)
         nb = _nb_marque_joueur(p, scoreurs)
-        if nb:
+        if nb and nom:
             suffixe = unite if (label == "HR" or nb == 1) else "runs"
-            valides.append(f"{p} ({nb} {suffixe})")
-    liste_pred = ", ".join(preds[:4])
+            valides.append(f"{nom} ({nb} {suffixe})")
+    liste_pred = ", ".join(noms_pred)
     if valides:
         return f"{liste_pred} → validés : {', '.join(valides)}", "✅"
     return f"{liste_pred} → aucun validé", "❌"
@@ -3150,6 +3243,10 @@ def assembler_lignes_recap_hot_pronostics(
     cotes_du_jour = (
         obtenir_cotes_moneyline_du_jour(ODDS_API_SPORT_KEY, cle_odds) if cle_odds else []
     )
+    date_str = datetime.now(TZ_JST).strftime('%Y-%m-%d')
+    archives_jour = _index_snapshots_par_cle(
+        (_charger_historique_predictions().get(date_str) or {}).get('matches') or []
+    )
 
     lignes = []
     for idx, m in enumerate(matchs_jour):
@@ -3161,6 +3258,14 @@ def assembler_lignes_recap_hot_pronostics(
         heure = m.get('heure_paris') or v.get('Heure (France)') or '—'
         pct_home = v.get('Proba Domicile (%)')
         pct_away = v.get('Proba Extérieur (%)')
+
+        snap = archives_jour.get(_cle_snapshot_match(m))
+        fige = bool(snap and (snap.get('fige') or _match_a_commence_npb(m.get('statut'))))
+        if fige and snap:
+            if snap.get('proba_home') is not None:
+                pct_home = snap.get('proba_home')
+            if snap.get('proba_away') is not None:
+                pct_away = snap.get('proba_away')
 
         favori, pct_fav = None, None
         if pct_home is not None and pct_away is not None and not pd.isna(pct_home) and not pd.isna(pct_away):
@@ -3190,19 +3295,30 @@ def assembler_lignes_recap_hot_pronostics(
         resume_away = resumes.get((m.get('code_away') or '').lower())
         runs_home = (resume_home or {}).get('moyenne_runs')
         runs_away = (resume_away or {}).get('moyenne_runs')
-        total_proj = _total_runs_predit(resume_home, resume_away)
+        total_proj = (
+            snap.get('total_runs_predit') if fige and snap and snap.get('total_runs_predit') is not None
+            else _total_runs_predit(resume_home, resume_away)
+        )
         classement_ou = classer_recommandation_totaux_over_under(total_proj, ligne_ou)
 
-        reco_hr_txt, reco_hr_detail = _formater_recos_joueurs_hot(
-            _top_recos_joueurs_match(df_hr_all, home, away, 'Indice HR (/100)', n=3)
-        )
-        reco_run_txt, reco_run_detail = _formater_recos_joueurs_hot(
-            _top_recos_joueurs_match(df_runs_all, home, away, 'Indice Run (/100)', n=3)
-        )
+        if fige and snap and (snap.get('reco_hr') or snap.get('reco_run')):
+            reco_hr_txt, reco_hr_detail = _formater_recos_joueurs_hot(snap.get('reco_hr') or [])
+            reco_run_txt, reco_run_detail = _formater_recos_joueurs_hot(snap.get('reco_run') or [])
+        else:
+            reco_hr_txt, reco_hr_detail = _formater_recos_joueurs_hot(
+                _top_recos_joueurs_match(df_hr_all, home, away, 'Indice HR (/100)', n=3)
+            )
+            reco_run_txt, reco_run_detail = _formater_recos_joueurs_hot(
+                _top_recos_joueurs_match(df_runs_all, home, away, 'Indice Run (/100)', n=3)
+            )
+
+        heure_aff = f"⏰ {heure}" if heure and heure != '—' else "⏰ —"
+        if fige:
+            heure_aff = f"{heure_aff} · 🔒 figé"
 
         lignes.append({
             'confrontation': f"{away} vs {home}",
-            'heure': f"⏰ {heure}" if heure and heure != '—' else "⏰ —",
+            'heure': heure_aff,
             'favori': favori,
             'favori_pct': pct_fav,
             'value_kind': value_kind,
@@ -3329,13 +3445,15 @@ def construire_bilan_veille(annee: int, date_hier_str: str, cache_bust: int = 0)
         )
         texte_ou, icone_ou = _bilan_over_under(total_predit, total_reel, ligne_ou)
         texte_hr, icone_hr = _bilan_joueurs_predits(
-            pred.get('candidats_hr_home') if pred else None,
-            pred.get('candidats_hr_away') if pred else None,
+            _preds_bilan_depuis_snapshot(pred, 'hr'),
             hr_home, hr_away, "HR",
         )
-        cand_runs_home, cand_runs_away = _candidats_runs_bilan_npb(pred, annee)
+        preds_run = _preds_bilan_depuis_snapshot(pred, 'run')
+        if not preds_run and pred:
+            h, a = _candidats_runs_bilan_npb(pred, annee)
+            preds_run = [{'joueur': n} for n in list(h or []) + list(a or []) if n]
         texte_run, icone_run = _bilan_joueurs_predits(
-            cand_runs_home, cand_runs_away, runs_home, runs_away, "Run",
+            preds_run, runs_home, runs_away, "Run",
         )
 
         lignes.append({
@@ -3414,12 +3532,11 @@ def afficher_bilan_predictions_veille(annee: int, cache_bust: int = 0):
         "réellement gagné. Over/Under : ligne de référence = moyenne réelle de runs cumulés par "
         "match sur la saison en cours ; ✅ si notre projection (moyenne de runs des 10 derniers "
         "matchs des deux équipes) était du même côté de cette ligne que le résultat réel. "
-        "HR prédit / Run prédit : ✅ si au moins un candidat archivé (top forme Hot Pronostics "
-        "par équipe) a réellement marqué un HR / un run. Total Runs / HR marqués : détail des "
-        "joueurs ayant réellement marqué, issu du boxscore officiel. ⏳ = aucune prédiction "
-        "n'avait été archivée pour ce match (application non consultée la veille) ou match nul. "
-        "Les prédictions ne sont archivées qu'au moment où l'onglet Résumé ou Hot Pronostics "
-        "est consulté ce jour-là (pas de calcul en tâche de fond)."
+        "HR prédit / Run prédit : ✅ si au moins un des 3 joueurs proposés Hot Pronostics "
+        "(instantané figé avant le coup d'envoi) a réellement marqué. Total Runs / HR marqués : "
+        "détail issu du boxscore officiel. ⏳ = aucune prédiction archivée (app non ouverte "
+        "avant le match) ou match nul. Chaque carte Hot Pronostics se fige dès le début du "
+        "match : les consultations en cours de match n'écrasent plus le bilan."
     )
 
 
